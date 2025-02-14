@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 
-
 use clap::{Parser};
 use eyre::{Result, eyre};
+use log::{debug, info, error};
 use std::path::PathBuf;
 use std::fs;
 use std::collections::HashMap;
@@ -45,21 +45,56 @@ struct FolderSettings {
 }
 
 fn load_config(cli: &Cli) -> Result<Config> {
+    debug!("Loading configuration from {:?}", cli.config);
+
     let content = fs::read_to_string(&cli.config)
-        .map_err(|e| eyre!("Failed to read config file {}: {}", cli.config.display(), e))?;
+        .map_err(|e| {
+            error!("Failed to read config file {}: {}", cli.config.display(), e);
+            eyre!("Failed to read config file {}: {}", cli.config.display(), e)
+        })?;
+
     let config: Config = serde_yaml::from_str(&content)
-        .map_err(|e| eyre!("Failed to parse YAML: {}", e))?;
+        .map_err(|e| {
+            error!("Failed to parse YAML: {}", e);
+            eyre!("Failed to parse YAML: {}", e)
+        })?;
+
+    debug!("Successfully loaded configuration.");
+    debug!("Parsed config: {:?}", config);
 
     Ok(config)
 }
 
 fn main() -> Result<()> {
+    // Initialize logging with env_logger, defaulting to INFO if RUST_LOG is not set
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+
+    info!("Starting IMAP Filter");
+
     let cli = Cli::parse();
+    debug!("Parsed CLI arguments: {:?}", cli);
+
     let config = load_config(&cli)?;
 
-    let imap_domain = cli.imap_domain.or(config.imap_domain).ok_or_else(|| eyre!("IMAP domain is required"))?;
-    let imap_username = cli.imap_username.or(config.imap_username).ok_or_else(|| eyre!("IMAP username is required"))?;
-    let imap_password = cli.imap_password.or(config.imap_password).ok_or_else(|| eyre!("IMAP password is required"))?;
+    let imap_domain = cli.imap_domain.or(config.imap_domain)
+        .ok_or_else(|| {
+            error!("IMAP domain is required but missing.");
+            eyre!("IMAP domain is required")
+        })?;
+
+    let imap_username = cli.imap_username.or(config.imap_username)
+        .ok_or_else(|| {
+            error!("IMAP username is required but missing.");
+            eyre!("IMAP username is required")
+        })?;
+
+    let imap_password = cli.imap_password.or(config.imap_password)
+        .ok_or_else(|| {
+            error!("IMAP password is required but missing.");
+            eyre!("IMAP password is required")
+        })?;
+
+    debug!("IMAP connection parameters retrieved successfully.");
 
     let filters: Vec<MessageFilter> = config
         .filters
@@ -72,8 +107,12 @@ fn main() -> Result<()> {
         })
         .collect();
 
+    debug!("Loaded {} filters.", filters.len());
+    debug!("Filters: {:?}", filters);
+
     let mut imap_filter = IMAPFilter::new(imap_domain, imap_username, imap_password, filters)?;
     imap_filter.execute()?;
 
+    info!("IMAP Filter execution completed successfully.");
     Ok(())
 }

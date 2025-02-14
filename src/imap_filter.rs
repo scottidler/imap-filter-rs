@@ -1,5 +1,6 @@
 use eyre::{Result, eyre};
 use imap::Session;
+use log::{debug, warn, error};
 use native_tls::{TlsConnector, TlsStream};
 use serde::de::{Deserializer, SeqAccess, Visitor};
 use serde::Deserialize;
@@ -60,53 +61,101 @@ where
 
 impl IMAPFilter {
     pub fn new(domain: String, username: String, password: String, filters: Vec<MessageFilter>) -> Result<Self> {
+        debug!("Initializing IMAP connection to {}", domain);
+
         let tls = TlsConnector::builder().build()?;
         let client = imap::connect((domain.as_str(), 993), &domain, &tls)
-            .map_err(|e| eyre!("IMAP connection failed: {:?}", e))?
+            .map_err(|e| {
+                error!("IMAP connection failed: {:?}", e);
+                eyre!("IMAP connection failed: {:?}", e)
+            })?
             .login(username, password)
-            .map_err(|e| eyre!("IMAP authentication failed: {:?}", e))?;
+            .map_err(|e| {
+                error!("IMAP authentication failed: {:?}", e);
+                eyre!("IMAP authentication failed: {:?}", e)
+            })?;
+
+        debug!("Successfully connected and authenticated to IMAP server.");
+
+        debug!("Filters loaded: {:?}", filters);
 
         Ok(Self { client, filters })
     }
 
     fn fetch_messages(&mut self) -> Result<Vec<Message>> {
+        debug!("Fetching messages from INBOX");
+
         self.client.select("INBOX")?;
         let messages = self.client.search("ALL")?;
-        let fetches = self.client.fetch(messages.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(","), "RFC822")?;
+        debug!("Found {} messages in INBOX", messages.len());
+
+        let fetches = self.client.fetch(
+            messages.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(","),
+            "RFC822"
+        )?;
+        debug!("Fetched message details for {} messages", fetches.len());
 
         let mut results = Vec::new();
         for fetch in fetches.iter() {
             if let Some(body) = fetch.body() {
+                debug!("Processing message UID: {}", fetch.message);
                 results.push(Message::new(fetch.message, body.to_vec()));
+            } else {
+                warn!("Message UID: {} has no body", fetch.message);
             }
         }
 
+        debug!("Successfully fetched {} messages", results.len());
         Ok(results)
     }
 
     fn apply_filters(&mut self, messages: &[Message]) -> Result<()> {
-        for filter in &self.filters {
-            let filtered: Vec<&Message> = messages.iter().filter(|msg| msg.compare(filter)).collect();
-            if !filtered.is_empty() {
-                let uids: Vec<String> = filtered.iter().map(|m| m.uid.to_string()).collect();
+        debug!("Applying filters to {} messages", messages.len());
 
-                if let Some(folder) = &filter.move_to {
-                    println!("Moving messages {:?} to {}", uids, folder);
-                    self.client.uid_copy(&uids.join(","), folder)?;
-                }
-                if filter.star.unwrap_or(false) {
-                    println!("Starring messages {:?}", uids);
-                    self.client.uid_store(&uids.join(","), "+FLAGS (\\Flagged)")?;
-                }
+        for filter in &self.filters {
+            debug!("Applying filter: {:?}", filter);
+
+            let filtered: Vec<&Message> = messages.iter().filter(|msg| msg.compare(filter)).collect();
+            if filtered.is_empty() {
+                debug!("No messages matched filter: {}", filter.name);
+                continue;
+            }
+
+            let uids: Vec<String> = filtered.iter().map(|m| m.uid.to_string()).collect();
+            debug!("Messages matching filter '{}': {:?}", filter.name, uids);
+
+            if let Some(folder) = &filter.move_to {
+                debug!("Moving messages {:?} to folder {}", uids, folder);
+                self.client.uid_copy(&uids.join(","), folder)
+                    .map_err(|e| {
+                        error!("Failed to move messages {:?} to {}: {:?}", uids, folder, e);
+                        e
+                    })?;
+            }
+
+            if filter.star.unwrap_or(false) {
+                debug!("Starring messages {:?}", uids);
+                self.client.uid_store(&uids.join(","), "+FLAGS (\\Flagged)")
+                    .map_err(|e| {
+                        error!("Failed to star messages {:?}: {:?}", uids, e);
+                        e
+                    })?;
             }
         }
+
+        debug!("Finished applying filters.");
         Ok(())
     }
 
     pub fn execute(&mut self) -> Result<()> {
+        debug!("Executing IMAP filter process");
+
         let messages = self.fetch_messages()?;
         self.apply_filters(&messages)?;
+
         self.client.logout()?;
+        debug!("IMAP session logged out successfully.");
+
         Ok(())
     }
 }
@@ -122,6 +171,8 @@ struct Message {
 
 impl Message {
     fn new(raw_uid: u32, raw_data: Vec<u8>) -> Self {
+        debug!("Parsing message UID: {}", raw_uid);
+
         let raw_string = String::from_utf8_lossy(&raw_data);
         let headers: HashMap<String, String> = raw_string
             .lines()
@@ -129,31 +180,41 @@ impl Message {
             .map(|(key, value)| (key.to_string(), value.to_string()))
             .collect();
 
-        Self {
+        let message = Self {
             uid: raw_uid,
             to: listify(headers.get("To").map(|s| s.split(',').map(|s| s.trim().to_string()).collect::<Vec<_>>()).as_ref()),
             cc: listify(headers.get("Cc").map(|s| s.split(',').map(|s| s.trim().to_string()).collect::<Vec<_>>()).as_ref()),
             fr: headers.get("From").cloned().unwrap_or_default(),
             sub: headers.get("Subject").cloned().unwrap_or_default(),
-        }
+        };
+
+        debug!("Parsed message: {:?}", message);
+        message
     }
 
     fn compare(&self, filter: &MessageFilter) -> bool {
+        debug!("Comparing message UID {} against filter: {}", self.uid, filter.name);
+
         if let Some(to) = &filter.to {
             if !compare(&self.to.join(","), to) {
+                debug!("Message UID {} did not match 'to' filter", self.uid);
                 return false;
             }
         }
         if let Some(cc) = &filter.cc {
             if !compare(&self.cc.join(","), cc) {
+                debug!("Message UID {} did not match 'cc' filter", self.uid);
                 return false;
             }
         }
         if let Some(fr) = &filter.fr {
             if !compare(&self.fr, &[fr.clone()]) {
+                debug!("Message UID {} did not match 'from' filter", self.uid);
                 return false;
             }
         }
+
+        debug!("Message UID {} matches filter: {}", self.uid, filter.name);
         true
     }
 }
