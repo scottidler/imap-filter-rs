@@ -11,46 +11,11 @@ use std::fmt;
 use std::net::TcpStream;
 use std::str::FromStr;
 
+
 fn extract_email(input: &str) -> String {
     parse_email_address(input)
         .map(|parsed| parsed.to_string()) // Convert Address<'_> to String
         .unwrap_or_else(|_| input.trim().to_string())
-}
-
-fn deserialize_email_list<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    struct EmailListVisitor;
-
-    impl<'de> Visitor<'de> for EmailListVisitor {
-        type Value = Option<Vec<String>>;
-
-        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-            formatter.write_str("a list of email strings")
-        }
-
-        fn visit_seq<M>(self, mut seq: M) -> Result<Self::Value, M::Error>
-        where
-            M: SeqAccess<'de>,
-        {
-            let mut emails = Vec::new();
-            while let Some(email_str) = seq.next_element::<String>()? {
-                emails.push(extract_email(&email_str));
-            }
-            Ok(Some(emails))
-        }
-    }
-
-    deserializer.deserialize_seq(EmailListVisitor)
-}
-
-fn deserialize_email<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let s: Option<String> = Option::deserialize(deserializer)?;
-    Ok(s.map(|input| extract_email(&input)))
 }
 
 #[derive(Debug)]
@@ -133,6 +98,47 @@ impl Message {
         debug!("Final filter match result: {}", matched);
         matched
     }
+}
+
+fn deserialize_email_list<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct EmailListVisitor;
+
+    impl<'de> Visitor<'de> for EmailListVisitor {
+        type Value = Option<Vec<String>>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("a list of email strings")
+        }
+
+        fn visit_seq<M>(self, mut seq: M) -> Result<Self::Value, M::Error>
+        where
+            M: SeqAccess<'de>,
+        {
+            let mut emails = Vec::new();
+            while let Some(email_str) = seq.next_element::<String>()? {
+                emails.push(extract_email(&email_str));
+            }
+            Ok(Some(emails))
+        }
+    }
+
+    deserializer.deserialize_seq(EmailListVisitor)
+}
+
+fn deserialize_email<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s: Option<String> = Option::deserialize(deserializer)?;
+    Ok(s.map(|input| extract_email(&input)))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AddressFilter {
+    pub patterns: Vec<String>
 }
 
 #[derive(Debug, Deserialize)]
