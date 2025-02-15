@@ -209,7 +209,6 @@ struct Message {
 
 impl Message {
     fn new(raw_uid: u32, raw_data: Vec<u8>) -> Self {
-
         let raw_string = String::from_utf8_lossy(&raw_data);
         let headers: HashMap<String, String> = raw_string
             .lines()
@@ -235,8 +234,10 @@ impl Message {
 
     /// Compare a message against a filter
     fn compare(&self, filter: &MessageFilter) -> bool {
-        debug!("Comparing message UID {}: FROM '{}' TO {:?} CC {:?}",
-            self.uid, self.from.email,
+        debug!(
+            "Comparing message: SUBJECT '{}' FROM '{}' TO {:?} CC {:?}",
+            self.subject,
+            self.from.email,
             self.to.iter().map(|p| &p.email).collect::<Vec<_>>(),
             self.cc.iter().map(|p| &p.email).collect::<Vec<_>>()
         );
