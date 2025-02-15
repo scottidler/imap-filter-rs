@@ -1,10 +1,13 @@
 #![allow(dead_code, unused_imports)]
 
 use clap::{Parser};
+use env_logger::Builder;
 use eyre::{Result, eyre};
 use log::{debug, info, error};
 use std::path::PathBuf;
+use std::io::Write;
 use std::fs;
+use std::fs::OpenOptions;
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
@@ -64,10 +67,33 @@ fn load_config(cli: &Cli) -> Result<Config> {
     Ok(config)
 }
 
-fn main() -> Result<()> {
-    // Initialize logging with env_logger, defaulting to INFO if RUST_LOG is not set
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+fn setup_logging() {
+    let log_file = "imap-filter.log";
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_file)
+        .expect("Failed to open log file");
 
+    let log_writer = Box::new(file);
+
+    Builder::from_env(env_logger::Env::default().default_filter_or("info")) // Use RUST_LOG or default to INFO
+        .format(|buf, record| {
+            writeln!(
+                buf,
+                "{} [{}] {}",
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+                record.level(),
+                record.args()
+            )
+        })
+        .target(env_logger::Target::Pipe(log_writer))
+        .init();
+}
+
+fn main() -> Result<()> {
+    setup_logging();
+    info!("=====================================================================================================================");
     info!("Starting IMAP Filter");
 
     let cli = Cli::parse();

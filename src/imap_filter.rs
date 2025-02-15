@@ -1,49 +1,30 @@
-use addr::psl::parse_email_address;
+use addr::parse_email_address;
 use eyre::{Result, eyre};
-use globset::{Glob, GlobMatcher};
+use globset::Glob;
 use imap::Session;
 use log::{debug, warn, error, info};
 use native_tls::{TlsConnector, TlsStream};
-use regex::Regex;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer};
 use serde::de::{SeqAccess, Visitor};
 use std::collections::HashMap;
 use std::fmt;
 use std::net::TcpStream;
 use std::str::FromStr;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Person {
-    pub name: String,
-    pub email: String,
+fn extract_email(input: &str) -> String {
+    parse_email_address(input)
+        .map(|parsed| parsed.to_string()) // Convert Address<'_> to String
+        .unwrap_or_else(|_| input.trim().to_string())
 }
 
-impl Person {
-    pub fn from_email_string(input: &str) -> Self {
-        let re = Regex::new(r#"^"?([^<"]+)"?\s*<([^>]+)>$"#).unwrap();
-
-        if let Some(caps) = re.captures(input) {
-            Self {
-                name: caps.get(1).map(|m| m.as_str().trim().to_string()).unwrap_or_default(),
-                email: caps.get(2).map(|m| m.as_str().to_string()).unwrap_or_default(),
-            }
-        } else {
-            Self {
-                name: "".to_string(),
-                email: input.trim().to_string(),
-            }
-        }
-    }
-}
-
-fn deserialize_person_list<'de, D>(deserializer: D) -> Result<Option<Vec<Person>>, D::Error>
+fn deserialize_email_list<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
 where
     D: Deserializer<'de>,
 {
-    struct PersonListVisitor;
+    struct EmailListVisitor;
 
-    impl<'de> Visitor<'de> for PersonListVisitor {
-        type Value = Option<Vec<Person>>;
+    impl<'de> Visitor<'de> for EmailListVisitor {
+        type Value = Option<Vec<String>>;
 
         fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
             formatter.write_str("a list of email strings")
@@ -53,31 +34,31 @@ where
         where
             M: SeqAccess<'de>,
         {
-            let mut persons = Vec::new();
+            let mut emails = Vec::new();
             while let Some(email_str) = seq.next_element::<String>()? {
-                persons.push(Person::from_email_string(&email_str));
+                emails.push(extract_email(&email_str));
             }
-            Ok(Some(persons))
+            Ok(Some(emails))
         }
     }
 
-    deserializer.deserialize_seq(PersonListVisitor)
+    deserializer.deserialize_seq(EmailListVisitor)
 }
 
-fn deserialize_person<'de, D>(deserializer: D) -> Result<Option<Person>, D::Error>
+fn deserialize_email<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
     D: Deserializer<'de>,
 {
     let s: Option<String> = Option::deserialize(deserializer)?;
-    Ok(s.map(|input| Person::from_email_string(&input)))
+    Ok(s.map(|input| extract_email(&input)))
 }
 
 #[derive(Debug)]
 struct Message {
     uid: u32,
-    to: Vec<Person>,
-    cc: Vec<Person>,
-    from: Person,
+    to: Vec<String>,
+    cc: Vec<String>,
+    from: String,
     subject: String,
 }
 
@@ -99,9 +80,9 @@ impl Message {
 
         Self {
             uid: raw_uid,
-            to: to_list.iter().map(|s| Person::from_email_string(s)).collect(),
-            cc: cc_list.iter().map(|s| Person::from_email_string(s)).collect(),
-            from: Person::from_email_string(headers.get("From").unwrap_or(&"".to_string())),
+            to: to_list.iter().map(|s| extract_email(s)).collect(),
+            cc: cc_list.iter().map(|s| extract_email(s)).collect(),
+            from: extract_email(headers.get("From").unwrap_or(&"".to_string())),
             subject: headers.get("Subject").cloned().unwrap_or_default(),
         }
     }
@@ -111,19 +92,18 @@ impl Message {
             "Comparing message: UID {} SUBJECT '{}' FROM '{}' TO {:?} CC {:?}",
             self.uid,
             self.subject,
-            self.from.email,
-            self.to.iter().map(|p| &p.email).collect::<Vec<_>>(),
-            self.cc.iter().map(|p| &p.email).collect::<Vec<_>>()
+            self.from,
+            self.to,
+            self.cc
         );
 
         let mut matched = true;
 
         // Match TO field using globs
         if let Some(to_filter) = &filter.to {
-            let to_emails: Vec<&str> = self.to.iter().map(|p| p.email.as_str()).collect();
-            matched &= to_filter.iter().any(|person| {
-                let glob = Glob::new(&person.email).expect("Invalid glob pattern").compile_matcher();
-                to_emails.iter().any(|email| glob.is_match(email))
+            matched &= to_filter.iter().any(|pattern| {
+                let glob = Glob::new(pattern).expect("Invalid glob pattern").compile_matcher();
+                self.to.iter().any(|email| glob.is_match(email))
             });
 
             debug!("TO filter match result: {}", matched);
@@ -131,10 +111,9 @@ impl Message {
 
         // Match CC field using globs
         if let Some(cc_filter) = &filter.cc {
-            let cc_emails: Vec<&str> = self.cc.iter().map(|p| p.email.as_str()).collect();
-            matched &= cc_filter.iter().any(|person| {
-                let glob = Glob::new(&person.email).expect("Invalid glob pattern").compile_matcher();
-                cc_emails.iter().any(|email| glob.is_match(email))
+            matched &= cc_filter.iter().any(|pattern| {
+                let glob = Glob::new(pattern).expect("Invalid glob pattern").compile_matcher();
+                self.cc.iter().any(|email| glob.is_match(email))
             });
 
             debug!("CC filter match result: {}", matched);
@@ -142,12 +121,12 @@ impl Message {
 
         // Match FROM field using globs
         if let Some(fr_filter) = &filter.fr {
-            let glob = Glob::new(&fr_filter.email).expect("Invalid glob pattern").compile_matcher();
-            matched &= glob.is_match(&self.from.email);
+            let glob = Glob::new(fr_filter).expect("Invalid glob pattern").compile_matcher();
+            matched &= glob.is_match(&self.from);
 
             debug!(
                 "FROM filter match: '{}' against '{}' -> {}",
-                self.from.email, fr_filter.email, matched
+                self.from, fr_filter, matched
             );
         }
 
@@ -161,14 +140,14 @@ pub struct MessageFilter {
     #[serde(skip_deserializing)]
     pub name: String,
 
-    #[serde(default, deserialize_with = "deserialize_person_list")]
-    pub to: Option<Vec<Person>>,
+    #[serde(default, deserialize_with = "deserialize_email_list")]
+    pub to: Option<Vec<String>>,
 
-    #[serde(default, deserialize_with = "deserialize_person_list")]
-    pub cc: Option<Vec<Person>>,
+    #[serde(default, deserialize_with = "deserialize_email_list")]
+    pub cc: Option<Vec<String>>,
 
-    #[serde(default, deserialize_with = "deserialize_person")]
-    pub fr: Option<Person>,
+    #[serde(default, deserialize_with = "deserialize_email")]
+    pub fr: Option<String>,
 
     pub move_to: Option<String>,
     pub star: Option<bool>,
@@ -186,19 +165,11 @@ impl IMAPFilter {
 
         let tls = TlsConnector::builder().build()?;
         let client = imap::connect((domain.as_str(), 993), &domain, &tls)
-            .map_err(|e| {
-                error!("IMAP connection failed: {:?}", e);
-                eyre!("IMAP connection failed: {:?}", e)
-            })?
+            .map_err(|e| eyre!("IMAP connection failed: {:?}", e))?
             .login(username, password)
-            .map_err(|e| {
-                error!("IMAP authentication failed: {:?}", e);
-                eyre!("IMAP authentication failed: {:?}", e)
-            })?;
+            .map_err(|e| eyre!("IMAP authentication failed: {:?}", e))?;
 
         debug!("Successfully connected and authenticated to IMAP server.");
-        debug!("Filters loaded: {:?}", filters);
-
         Ok(Self { client, filters })
     }
 
@@ -213,14 +184,11 @@ impl IMAPFilter {
             messages.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(","),
             "RFC822"
         )?;
-        debug!("Fetched message details for {} messages", fetches.len());
 
         let mut results = Vec::new();
         for fetch in fetches.iter() {
             if let Some(body) = fetch.body() {
                 results.push(Message::new(fetch.message, body.to_vec()));
-            } else {
-                warn!("Message UID: {} has no body", fetch.message);
             }
         }
 
@@ -241,42 +209,21 @@ impl IMAPFilter {
                 continue;
             }
 
-            // Log detailed message metadata instead of UIDs
             for msg in &filtered {
                 info!(
                     "Matched filter '{}': SUBJECT '{}' FROM '{}' TO {:?} CC {:?}",
-                    filter.name,
-                    msg.subject,
-                    msg.from.email,
-                    msg.to.iter().map(|p| &p.email).collect::<Vec<_>>(),
-                    msg.cc.iter().map(|p| &p.email).collect::<Vec<_>>(),
+                    filter.name, msg.subject, msg.from, msg.to, msg.cc
                 );
             }
 
-            // Move matching emails
             if let Some(folder) = &filter.move_to {
-                info!(
-                    "Moving {} messages to folder '{}'",
-                    filtered.len(),
-                    folder
-                );
                 let uids: Vec<String> = filtered.iter().map(|m| m.uid.to_string()).collect();
-                self.client.uid_copy(&uids.join(","), folder)
-                    .map_err(|e| {
-                        error!("Failed to move messages to {}: {:?}", folder, e);
-                        e
-                    })?;
+                self.client.uid_copy(&uids.join(","), folder)?;
             }
 
-            // Star matching emails
             if filter.star.unwrap_or(false) {
-                info!("Starring {} messages", filtered.len());
                 let uids: Vec<String> = filtered.iter().map(|m| m.uid.to_string()).collect();
-                self.client.uid_store(&uids.join(","), "+FLAGS (\\Flagged)")
-                    .map_err(|e| {
-                        error!("Failed to star messages: {:?}", e);
-                        e
-                    })?;
+                self.client.uid_store(&uids.join(","), "+FLAGS (\\Flagged)")?;
             }
         }
 
