@@ -1,5 +1,6 @@
 use addr::psl::parse_email_address;
 use eyre::{Result, eyre};
+use globset::{Glob, GlobMatcher};
 use imap::Session;
 use log::{debug, warn, error, info};
 use native_tls::{TlsConnector, TlsStream};
@@ -107,16 +108,51 @@ impl Message {
 
     fn compare(&self, filter: &MessageFilter) -> bool {
         debug!(
-            "Comparing message: SUBJECT '{}' FROM '{}' TO {:?} CC {:?}",
+            "Comparing message: UID {} SUBJECT '{}' FROM '{}' TO {:?} CC {:?}",
+            self.uid,
             self.subject,
             self.from.email,
             self.to.iter().map(|p| &p.email).collect::<Vec<_>>(),
             self.cc.iter().map(|p| &p.email).collect::<Vec<_>>()
         );
 
-        filter.to.as_ref().map_or(true, |to| self.to.iter().any(|p| to.contains(p)))
-            && filter.cc.as_ref().map_or(true, |cc| self.cc.iter().any(|p| cc.contains(p)))
-            && filter.fr.as_ref().map_or(true, |fr| &self.from == fr)
+        let mut matched = true;
+
+        // Match TO field using globs
+        if let Some(to_filter) = &filter.to {
+            let to_emails: Vec<&str> = self.to.iter().map(|p| p.email.as_str()).collect();
+            matched &= to_filter.iter().any(|person| {
+                let glob = Glob::new(&person.email).expect("Invalid glob pattern").compile_matcher();
+                to_emails.iter().any(|email| glob.is_match(email))
+            });
+
+            debug!("TO filter match result: {}", matched);
+        }
+
+        // Match CC field using globs
+        if let Some(cc_filter) = &filter.cc {
+            let cc_emails: Vec<&str> = self.cc.iter().map(|p| p.email.as_str()).collect();
+            matched &= cc_filter.iter().any(|person| {
+                let glob = Glob::new(&person.email).expect("Invalid glob pattern").compile_matcher();
+                cc_emails.iter().any(|email| glob.is_match(email))
+            });
+
+            debug!("CC filter match result: {}", matched);
+        }
+
+        // Match FROM field using globs
+        if let Some(fr_filter) = &filter.fr {
+            let glob = Glob::new(&fr_filter.email).expect("Invalid glob pattern").compile_matcher();
+            matched &= glob.is_match(&self.from.email);
+
+            debug!(
+                "FROM filter match: '{}' against '{}' -> {}",
+                self.from.email, fr_filter.email, matched
+            );
+        }
+
+        debug!("Final filter match result: {}", matched);
+        matched
     }
 }
 
