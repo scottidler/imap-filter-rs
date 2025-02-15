@@ -229,40 +229,58 @@ impl IMAPFilter {
     }
 
     fn apply_filters(&mut self, messages: &[Message]) -> Result<()> {
-        debug!("Applying filters to {} messages", messages.len());
+        info!("Applying filters to {} messages", messages.len());
 
         for filter in &self.filters {
-            debug!("Applying filter: {:?}", filter);
+            info!("Applying filter: {}", filter.name);
 
             let filtered: Vec<&Message> = messages.iter().filter(|&msg| msg.compare(filter)).collect();
+
             if filtered.is_empty() {
-                debug!("No messages matched filter: {}", filter.name);
+                info!("No messages matched filter: {}", filter.name);
                 continue;
             }
 
-            let uids: Vec<String> = filtered.iter().map(|m| m.uid.to_string()).collect();
-            debug!("Messages matching filter '{}': {:?}", filter.name, uids);
+            // Log detailed message metadata instead of UIDs
+            for msg in &filtered {
+                info!(
+                    "Matched filter '{}': SUBJECT '{}' FROM '{}' TO {:?} CC {:?}",
+                    filter.name,
+                    msg.subject,
+                    msg.from.email,
+                    msg.to.iter().map(|p| &p.email).collect::<Vec<_>>(),
+                    msg.cc.iter().map(|p| &p.email).collect::<Vec<_>>(),
+                );
+            }
 
+            // Move matching emails
             if let Some(folder) = &filter.move_to {
-                debug!("Moving messages {:?} to folder {}", uids, folder);
+                info!(
+                    "Moving {} messages to folder '{}'",
+                    filtered.len(),
+                    folder
+                );
+                let uids: Vec<String> = filtered.iter().map(|m| m.uid.to_string()).collect();
                 self.client.uid_copy(&uids.join(","), folder)
                     .map_err(|e| {
-                        error!("Failed to move messages {:?} to {}: {:?}", uids, folder, e);
+                        error!("Failed to move messages to {}: {:?}", folder, e);
                         e
                     })?;
             }
 
+            // Star matching emails
             if filter.star.unwrap_or(false) {
-                debug!("Starring messages {:?}", uids);
+                info!("Starring {} messages", filtered.len());
+                let uids: Vec<String> = filtered.iter().map(|m| m.uid.to_string()).collect();
                 self.client.uid_store(&uids.join(","), "+FLAGS (\\Flagged)")
                     .map_err(|e| {
-                        error!("Failed to star messages {:?}: {:?}", uids, e);
+                        error!("Failed to star messages: {:?}", e);
                         e
                     })?;
             }
         }
 
-        debug!("Finished applying filters.");
+        info!("Finished applying filters.");
         Ok(())
     }
 
