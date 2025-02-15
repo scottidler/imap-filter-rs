@@ -1,4 +1,4 @@
-#![allow(dead_code)]
+#![allow(dead_code, unused_imports)]
 
 use clap::{Parser};
 use eyre::{Result, eyre};
@@ -8,7 +8,6 @@ use std::fs;
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
-mod leatherman;
 mod imap_filter;
 
 use imap_filter::{IMAPFilter, MessageFilter};

@@ -1,22 +1,94 @@
+use addr::psl::parse_email_address;
 use eyre::{Result, eyre};
 use imap::Session;
 use log::{debug, warn, error};
 use native_tls::{TlsConnector, TlsStream};
-use serde::de::{Deserializer, SeqAccess, Visitor};
-use serde::Deserialize;
+use regex::Regex;
+use serde::{Deserialize, Deserializer, Serialize};
+use serde::de::{SeqAccess, Visitor};
 use std::collections::HashMap;
 use std::fmt;
 use std::net::TcpStream;
+use std::str::FromStr;
 
-use crate::leatherman::{compare, listify};
+/// Represents a person with a name and an email address.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Person {
+    pub name: String,
+    pub email: String,
+}
+
+impl Person {
+    /// Parses a raw email string into a `Person` struct.
+    pub fn from_email_string(input: &str) -> Self {
+        let re = Regex::new(r#"^"?([^<"]+)"?\s*<([^>]+)>$"#).unwrap();
+
+        if let Some(caps) = re.captures(input) {
+            Self {
+                name: caps.get(1).map(|m| m.as_str().trim().to_string()).unwrap_or_default(),
+                email: caps.get(2).map(|m| m.as_str().to_string()).unwrap_or_default(),
+            }
+        } else {
+            Self {
+                name: "".to_string(),
+                email: input.trim().to_string(),
+            }
+        }
+    }
+}
+
+/// Custom deserialization for lists of `Person`
+fn deserialize_person_list<'de, D>(deserializer: D) -> Result<Option<Vec<Person>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct PersonListVisitor;
+
+    impl<'de> Visitor<'de> for PersonListVisitor {
+        type Value = Option<Vec<Person>>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("a list of email strings")
+        }
+
+        fn visit_seq<M>(self, mut seq: M) -> Result<Self::Value, M::Error>
+        where
+            M: SeqAccess<'de>,
+        {
+            let mut persons = Vec::new();
+            while let Some(email_str) = seq.next_element::<String>()? {
+                persons.push(Person::from_email_string(&email_str));
+            }
+            Ok(Some(persons))
+        }
+    }
+
+    deserializer.deserialize_seq(PersonListVisitor)
+}
+
+/// Custom deserialization for a single `Person`
+fn deserialize_person<'de, D>(deserializer: D) -> Result<Option<Person>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s: Option<String> = Option::deserialize(deserializer)?;
+    Ok(s.map(|input| Person::from_email_string(&input)))
+}
 
 #[derive(Debug, Deserialize)]
 pub struct MessageFilter {
     #[serde(skip_deserializing)]
     pub name: String,
-    pub to: Option<Vec<String>>,
-    pub cc: Option<Vec<String>>,
-    pub fr: Option<String>,
+
+    #[serde(default, deserialize_with = "deserialize_person_list")]
+    pub to: Option<Vec<Person>>,
+
+    #[serde(default, deserialize_with = "deserialize_person_list")]
+    pub cc: Option<Vec<Person>>,
+
+    #[serde(default, deserialize_with = "deserialize_person")]
+    pub fr: Option<Person>,
+
     pub move_to: Option<String>,
     pub star: Option<bool>,
 }
@@ -25,38 +97,6 @@ pub struct MessageFilter {
 pub struct IMAPFilter {
     client: Session<TlsStream<TcpStream>>,
     filters: Vec<MessageFilter>,
-}
-
-/// Custom deserialization for `filters`, handling a sequence of single-key maps.
-pub fn deserialize_filters<'de, D>(deserializer: D) -> Result<Vec<MessageFilter>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    struct FilterList;
-
-    impl<'de> Visitor<'de> for FilterList {
-        type Value = Vec<MessageFilter>;
-
-        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-            formatter.write_str("a sequence of maps where each map contains a single key-value pair")
-        }
-
-        fn visit_seq<M>(self, mut seq: M) -> Result<Self::Value, M::Error>
-        where
-            M: SeqAccess<'de>,
-        {
-            let mut filters = Vec::new();
-            while let Some(map) = seq.next_element::<HashMap<String, MessageFilter>>()? {
-                for (name, mut filter) in map {
-                    filter.name = name;
-                    filters.push(filter);
-                }
-            }
-            Ok(filters)
-        }
-    }
-
-    deserializer.deserialize_seq(FilterList)
 }
 
 impl IMAPFilter {
@@ -76,7 +116,6 @@ impl IMAPFilter {
             })?;
 
         debug!("Successfully connected and authenticated to IMAP server.");
-
         debug!("Filters loaded: {:?}", filters);
 
         Ok(Self { client, filters })
@@ -163,10 +202,10 @@ impl IMAPFilter {
 #[derive(Debug)]
 struct Message {
     uid: u32,
-    to: Vec<String>,
-    cc: Vec<String>,
-    fr: String,
-    sub: String,
+    to: Vec<Person>,
+    cc: Vec<Person>,
+    from: Person,
+    subject: String,
 }
 
 impl Message {
@@ -180,41 +219,26 @@ impl Message {
             .map(|(key, value)| (key.to_string(), value.to_string()))
             .collect();
 
-        let message = Self {
-            uid: raw_uid,
-            to: listify(headers.get("To").map(|s| s.split(',').map(|s| s.trim().to_string()).collect::<Vec<_>>()).as_ref()),
-            cc: listify(headers.get("Cc").map(|s| s.split(',').map(|s| s.trim().to_string()).collect::<Vec<_>>()).as_ref()),
-            fr: headers.get("From").cloned().unwrap_or_default(),
-            sub: headers.get("Subject").cloned().unwrap_or_default(),
-        };
+        let to_list = headers.get("To")
+            .map(|s| s.split(',').map(|s| s.trim().to_string()).collect::<Vec<_>>())
+            .unwrap_or_default();
+        let cc_list = headers.get("Cc")
+            .map(|s| s.split(',').map(|s| s.trim().to_string()).collect::<Vec<_>>())
+            .unwrap_or_default();
 
-        debug!("Parsed message: {:?}", message);
-        message
+        Self {
+            uid: raw_uid,
+            to: to_list.iter().map(|s| Person::from_email_string(s)).collect(),
+            cc: cc_list.iter().map(|s| Person::from_email_string(s)).collect(),
+            from: Person::from_email_string(headers.get("From").unwrap_or(&"".to_string())),
+            subject: headers.get("Subject").cloned().unwrap_or_default(),
+        }
     }
 
+    /// Compare a message against a filter
     fn compare(&self, filter: &MessageFilter) -> bool {
-        debug!("Comparing message UID {} against filter: {}", self.uid, filter.name);
-
-        if let Some(to) = &filter.to {
-            if !compare(&self.to.join(","), to) {
-                debug!("Message UID {} did not match 'to' filter", self.uid);
-                return false;
-            }
-        }
-        if let Some(cc) = &filter.cc {
-            if !compare(&self.cc.join(","), cc) {
-                debug!("Message UID {} did not match 'cc' filter", self.uid);
-                return false;
-            }
-        }
-        if let Some(fr) = &filter.fr {
-            if !compare(&self.fr, &[fr.clone()]) {
-                debug!("Message UID {} did not match 'from' filter", self.uid);
-                return false;
-            }
-        }
-
-        debug!("Message UID {} matches filter: {}", self.uid, filter.name);
-        true
+        filter.to.as_ref().map_or(true, |to| self.to.iter().any(|p| to.contains(p)))
+            && filter.cc.as_ref().map_or(true, |cc| self.cc.iter().any(|p| cc.contains(p)))
+            && filter.fr.as_ref().map_or(true, |fr| &self.from == fr)
     }
 }
