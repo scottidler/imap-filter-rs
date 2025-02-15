@@ -1,7 +1,7 @@
 use addr::psl::parse_email_address;
 use eyre::{Result, eyre};
 use imap::Session;
-use log::{debug, warn, error};
+use log::{debug, warn, error, info};
 use native_tls::{TlsConnector, TlsStream};
 use regex::Regex;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -137,7 +137,6 @@ impl IMAPFilter {
         let mut results = Vec::new();
         for fetch in fetches.iter() {
             if let Some(body) = fetch.body() {
-                debug!("Processing message UID: {}", fetch.message);
                 results.push(Message::new(fetch.message, body.to_vec()));
             } else {
                 warn!("Message UID: {} has no body", fetch.message);
@@ -154,7 +153,7 @@ impl IMAPFilter {
         for filter in &self.filters {
             debug!("Applying filter: {:?}", filter);
 
-            let filtered: Vec<&Message> = messages.iter().filter(|msg| msg.compare(filter)).collect();
+            let filtered: Vec<&Message> = messages.iter().filter(|&msg| msg.compare(filter)).collect();
             if filtered.is_empty() {
                 debug!("No messages matched filter: {}", filter.name);
                 continue;
@@ -210,7 +209,6 @@ struct Message {
 
 impl Message {
     fn new(raw_uid: u32, raw_data: Vec<u8>) -> Self {
-        debug!("Parsing message UID: {}", raw_uid);
 
         let raw_string = String::from_utf8_lossy(&raw_data);
         let headers: HashMap<String, String> = raw_string
@@ -237,6 +235,12 @@ impl Message {
 
     /// Compare a message against a filter
     fn compare(&self, filter: &MessageFilter) -> bool {
+        debug!("Comparing message UID {}: FROM '{}' TO {:?} CC {:?}",
+            self.uid, self.from.email,
+            self.to.iter().map(|p| &p.email).collect::<Vec<_>>(),
+            self.cc.iter().map(|p| &p.email).collect::<Vec<_>>()
+        );
+
         filter.to.as_ref().map_or(true, |to| self.to.iter().any(|p| to.contains(p)))
             && filter.cc.as_ref().map_or(true, |cc| self.cc.iter().any(|p| cc.contains(p)))
             && filter.fr.as_ref().map_or(true, |fr| &self.from == fr)
