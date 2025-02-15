@@ -11,7 +11,6 @@ use std::fmt;
 use std::net::TcpStream;
 use std::str::FromStr;
 
-/// Represents a person with a name and an email address.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Person {
     pub name: String,
@@ -19,7 +18,6 @@ pub struct Person {
 }
 
 impl Person {
-    /// Parses a raw email string into a `Person` struct.
     pub fn from_email_string(input: &str) -> Self {
         let re = Regex::new(r#"^"?([^<"]+)"?\s*<([^>]+)>$"#).unwrap();
 
@@ -37,7 +35,6 @@ impl Person {
     }
 }
 
-/// Custom deserialization for lists of `Person`
 fn deserialize_person_list<'de, D>(deserializer: D) -> Result<Option<Vec<Person>>, D::Error>
 where
     D: Deserializer<'de>,
@@ -66,13 +63,61 @@ where
     deserializer.deserialize_seq(PersonListVisitor)
 }
 
-/// Custom deserialization for a single `Person`
 fn deserialize_person<'de, D>(deserializer: D) -> Result<Option<Person>, D::Error>
 where
     D: Deserializer<'de>,
 {
     let s: Option<String> = Option::deserialize(deserializer)?;
     Ok(s.map(|input| Person::from_email_string(&input)))
+}
+
+#[derive(Debug)]
+struct Message {
+    uid: u32,
+    to: Vec<Person>,
+    cc: Vec<Person>,
+    from: Person,
+    subject: String,
+}
+
+impl Message {
+    fn new(raw_uid: u32, raw_data: Vec<u8>) -> Self {
+        let raw_string = String::from_utf8_lossy(&raw_data);
+        let headers: HashMap<String, String> = raw_string
+            .lines()
+            .filter_map(|line| line.split_once(": "))
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect();
+
+        let to_list = headers.get("To")
+            .map(|s| s.split(',').map(|s| s.trim().to_string()).collect::<Vec<_>>())
+            .unwrap_or_default();
+        let cc_list = headers.get("Cc")
+            .map(|s| s.split(',').map(|s| s.trim().to_string()).collect::<Vec<_>>())
+            .unwrap_or_default();
+
+        Self {
+            uid: raw_uid,
+            to: to_list.iter().map(|s| Person::from_email_string(s)).collect(),
+            cc: cc_list.iter().map(|s| Person::from_email_string(s)).collect(),
+            from: Person::from_email_string(headers.get("From").unwrap_or(&"".to_string())),
+            subject: headers.get("Subject").cloned().unwrap_or_default(),
+        }
+    }
+
+    fn compare(&self, filter: &MessageFilter) -> bool {
+        debug!(
+            "Comparing message: SUBJECT '{}' FROM '{}' TO {:?} CC {:?}",
+            self.subject,
+            self.from.email,
+            self.to.iter().map(|p| &p.email).collect::<Vec<_>>(),
+            self.cc.iter().map(|p| &p.email).collect::<Vec<_>>()
+        );
+
+        filter.to.as_ref().map_or(true, |to| self.to.iter().any(|p| to.contains(p)))
+            && filter.cc.as_ref().map_or(true, |cc| self.cc.iter().any(|p| cc.contains(p)))
+            && filter.fr.as_ref().map_or(true, |fr| &self.from == fr)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -195,55 +240,5 @@ impl IMAPFilter {
         debug!("IMAP session logged out successfully.");
 
         Ok(())
-    }
-}
-
-#[derive(Debug)]
-struct Message {
-    uid: u32,
-    to: Vec<Person>,
-    cc: Vec<Person>,
-    from: Person,
-    subject: String,
-}
-
-impl Message {
-    fn new(raw_uid: u32, raw_data: Vec<u8>) -> Self {
-        let raw_string = String::from_utf8_lossy(&raw_data);
-        let headers: HashMap<String, String> = raw_string
-            .lines()
-            .filter_map(|line| line.split_once(": "))
-            .map(|(key, value)| (key.to_string(), value.to_string()))
-            .collect();
-
-        let to_list = headers.get("To")
-            .map(|s| s.split(',').map(|s| s.trim().to_string()).collect::<Vec<_>>())
-            .unwrap_or_default();
-        let cc_list = headers.get("Cc")
-            .map(|s| s.split(',').map(|s| s.trim().to_string()).collect::<Vec<_>>())
-            .unwrap_or_default();
-
-        Self {
-            uid: raw_uid,
-            to: to_list.iter().map(|s| Person::from_email_string(s)).collect(),
-            cc: cc_list.iter().map(|s| Person::from_email_string(s)).collect(),
-            from: Person::from_email_string(headers.get("From").unwrap_or(&"".to_string())),
-            subject: headers.get("Subject").cloned().unwrap_or_default(),
-        }
-    }
-
-    /// Compare a message against a filter
-    fn compare(&self, filter: &MessageFilter) -> bool {
-        debug!(
-            "Comparing message: SUBJECT '{}' FROM '{}' TO {:?} CC {:?}",
-            self.subject,
-            self.from.email,
-            self.to.iter().map(|p| &p.email).collect::<Vec<_>>(),
-            self.cc.iter().map(|p| &p.email).collect::<Vec<_>>()
-        );
-
-        filter.to.as_ref().map_or(true, |to| self.to.iter().any(|p| to.contains(p)))
-            && filter.cc.as_ref().map_or(true, |cc| self.cc.iter().any(|p| cc.contains(p)))
-            && filter.fr.as_ref().map_or(true, |fr| &self.from == fr)
     }
 }
