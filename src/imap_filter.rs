@@ -55,22 +55,14 @@ impl Message {
     }
 
     fn compare(&self, filter: &MessageFilter) -> bool {
-        let to_match = filter.to.as_ref().map_or(false, |f| f.matches(&self.to));
-        let cc_match = filter.cc.as_ref().map_or(false, |f| f.matches(&self.cc));
-        let from_match = filter.from.as_ref().map_or(false, |f| f.matches(&self.from));
-        let final_match = to_match || cc_match || from_match;
+        let to_match = filter.to.as_ref().map_or(true, |f| f.matches(&self.to));
+        let cc_match = filter.cc.as_ref().map_or(true, |f| f.matches(&self.cc));
+        let from_match = filter.from.as_ref().map_or(true, |f| f.matches(&self.from));
+        let final_match = to_match && cc_match && from_match;
 
-        debug!(
-            "\n    subject: {}\n[{}] from: {:?}\n[{}] to: {:?}\n[{}] cc: {:?}\n[{}]",
-            self.subject,
-            if from_match { "T" } else { "F" },
-            self.from,
-            if to_match { "T" } else { "F" },
-            self.to,
-            if cc_match { "T" } else { "F" },
-            self.cc,
-            if final_match { "T" } else { "F" }
-        );
+        if final_match {
+            format_message_output(self, filter, from_match, to_match, cc_match, final_match);
+        }
 
         final_match
     }
@@ -192,30 +184,25 @@ impl IMAPFilter {
         info!("Applying filters to {} messages", messages.len());
 
         for filter in &self.filters {
-            info!("Applying filter: {}", filter.name);
+            println!("\n{}", filter.name);
+            if let Some(to) = &filter.to {
+                println!("    to: {:?}", to.patterns);
+            }
+            if let Some(cc) = &filter.cc {
+                println!("    cc: {:?}", cc.patterns);
+            }
+            if let Some(from) = &filter.from {
+                println!("    from: {:?}", from.patterns);
+            }
+            println!("    move: {}", filter.move_to.as_deref().unwrap_or("None"));
+            println!("    star: {}", filter.star.unwrap_or(false));
 
             let filtered: Vec<&Message> = messages.iter().filter(|&msg| msg.compare(filter)).collect();
 
-            if filtered.is_empty() {
-                info!("No messages matched filter: {}", filter.name);
-                continue;
-            }
+            println!("\nMatched {}/{} messages\n", filtered.len(), messages.len());
 
             for msg in &filtered {
-                info!(
-                    "Matched filter '{}': SUBJECT '{}' FROM {:?} TO {:?} CC {:?}",
-                    filter.name, msg.subject, msg.from, msg.to, msg.cc
-                );
-            }
-
-            if let Some(folder) = &filter.move_to {
-                let uids: Vec<String> = filtered.iter().map(|m| m.uid.to_string()).collect();
-                self.client.uid_copy(&uids.join(","), folder)?;
-            }
-
-            if filter.star.unwrap_or(false) {
-                let uids: Vec<String> = filtered.iter().map(|m| m.uid.to_string()).collect();
-                self.client.uid_store(&uids.join(","), "+FLAGS (\\Flagged)")?;
+                format_message_output(msg, filter, true, true, true, true);
             }
         }
 
@@ -234,4 +221,29 @@ impl IMAPFilter {
 
         Ok(())
     }
+}
+
+fn format_message_output(
+    message: &Message,
+    filter: &MessageFilter,
+    from_match: bool,
+    to_match: bool,
+    cc_match: bool,
+    final_match: bool,
+) {
+    let mut output = format!("\n    subject: {}", message.subject);
+
+    if filter.from.is_some() {
+        output.push_str(&format!("\n[{}] from: {:?}", if from_match { "T" } else { "F" }, message.from));
+    }
+    if filter.to.is_some() {
+        output.push_str(&format!("\n[{}] to: {:?}", if to_match { "T" } else { "F" }, message.to));
+    }
+    if filter.cc.is_some() {
+        output.push_str(&format!("\n[{}] cc: {:?}", if cc_match { "T" } else { "F" }, message.cc));
+    }
+    output.push_str(&format!("\n[{}]", if final_match { "T" } else { "F" }));
+
+    debug!("{}", output);
+    println!("{}", output);
 }
