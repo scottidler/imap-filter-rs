@@ -1,8 +1,7 @@
-use addr::parse_email_address;
 use eyre::{Result, eyre};
 use globset::Glob;
 use imap::Session;
-use log::{debug, warn, error, info};
+use log::{debug, info};
 use native_tls::{TlsConnector, TlsStream};
 use serde::{Deserialize, Deserializer};
 use serde::de::{SeqAccess, Visitor};
@@ -10,19 +9,34 @@ use std::collections::HashMap;
 use std::fmt;
 use std::net::TcpStream;
 use std::str::FromStr;
+use mailparse::{addrparse, MailAddr};
 
-fn extract_email(input: &str) -> String {
-    parse_email_address(input)
-        .map(|parsed| parsed.to_string())
-        .unwrap_or_else(|_| input.trim().to_string())
+fn parse_email_header(header: &str) -> Vec<(String, String)> {
+    match addrparse(header) {
+        Ok(parsed) => parsed
+            .iter()
+            .flat_map(|addr| match addr {
+                MailAddr::Single(info) => vec![
+                    (info.display_name.clone().unwrap_or_default(), info.addr.clone())
+                ],
+                MailAddr::Group(group) => group.addrs.iter()
+                    .map(|info| (
+                        info.display_name.clone().unwrap_or_default(),
+                        info.addr.clone()
+                    ))
+                    .collect(),
+            })
+            .collect(),
+        Err(_) => vec![],
+    }
 }
 
 #[derive(Debug)]
 struct Message {
     uid: u32,
-    to: Vec<String>,
-    cc: Vec<String>,
-    from: Vec<String>,
+    to: Vec<(String, String)>,
+    cc: Vec<(String, String)>,
+    from: Vec<(String, String)>,
     subject: String,
 }
 
@@ -35,36 +49,33 @@ impl Message {
             .map(|(key, value)| (key.to_string(), value.to_string()))
             .collect();
 
-        let to_list = headers.get("To")
-            .map(|s| s.split(',').map(|s| s.trim().to_string()).collect::<Vec<_>>())
-            .unwrap_or_default();
-        let cc_list = headers.get("Cc")
-            .map(|s| s.split(',').map(|s| s.trim().to_string()).collect::<Vec<_>>())
-            .unwrap_or_default();
-        let from_list = headers.get("From")
-            .map(|s| s.split(',').map(|s| s.trim().to_string()).collect::<Vec<_>>())
-            .unwrap_or_default();
+        let to_list = headers.get("To").map(|s| parse_email_header(s)).unwrap_or_default();
+        let cc_list = headers.get("Cc").map(|s| parse_email_header(s)).unwrap_or_default();
+        let from_list = headers.get("From").map(|s| parse_email_header(s)).unwrap_or_default();
 
         Self {
             uid: raw_uid,
-            to: to_list.iter().map(|s| extract_email(s)).collect(),
-            cc: cc_list.iter().map(|s| extract_email(s)).collect(),
-            from: from_list.iter().map(|s| extract_email(s)).collect(),
+            to: to_list,
+            cc: cc_list,
+            from: from_list,
             subject: headers.get("Subject").cloned().unwrap_or_default(),
         }
     }
 
     fn compare(&self, filter: &MessageFilter) -> bool {
-        let to_match = filter.to.as_ref().map_or(true, |f| f.matches(&self.to));
-        let cc_match = filter.cc.as_ref().map_or(true, |f| f.matches(&self.cc));
-        let from_match = filter.from.as_ref().map_or(true, |f| f.matches(&self.from));
-        let final_match = to_match && cc_match && from_match;
+        let to_match = filter.to.as_ref().map_or(true, |f| {
+            f.matches(&self.to.iter().map(|(_, email)| email.clone()).collect::<Vec<_>>())
+        });
 
-        if final_match {
-            format_message_output(self, filter, from_match, to_match, cc_match, final_match);
-        }
+        let cc_match = filter.cc.as_ref().map_or(true, |f| {
+            f.matches(&self.cc.iter().map(|(_, email)| email.clone()).collect::<Vec<_>>())
+        });
 
-        final_match
+        let from_match = filter.from.as_ref().map_or(true, |f| {
+            f.matches(&self.from.iter().map(|(_, email)| email.clone()).collect::<Vec<_>>())
+        });
+
+        to_match && cc_match && from_match
     }
 }
 
@@ -201,8 +212,8 @@ impl IMAPFilter {
 
             println!("\nMatched {}/{} messages\n", filtered.len(), messages.len());
 
-            for msg in &filtered {
-                format_message_output(msg, filter, true, true, true, true);
+            for msg in filtered.iter() {
+                format_message_output(msg);
             }
         }
 
@@ -223,29 +234,13 @@ impl IMAPFilter {
     }
 }
 
-fn format_message_output(
-    message: &Message,
-    filter: &MessageFilter,
-    from_match: bool,
-    to_match: bool,
-    cc_match: bool,
-    final_match: bool,
-) {
-    let mut output = format!("\n    subject: {}", message.subject);
-
-    if filter.from.is_some() {
-        output.push_str(&format!("\n[{}] from: {:?}", if from_match { "T" } else { "F" }, message.from));
+fn format_message_output(message: &Message) {
+    println!("\n    subject: {}", message.subject);
+    println!("    from: {:?}", message.from);
+    println!("    to: {:?}", message.to);
+    if !message.cc.is_empty() {
+        println!("    cc: {:?}", message.cc);
     }
-    if filter.to.is_some() {
-        output.push_str(&format!("\n[{}] to: {:?}", if to_match { "T" } else { "F" }, message.to));
-    }
-    if filter.cc.is_some() {
-        output.push_str(&format!("\n[{}] cc: {:?}", if cc_match { "T" } else { "F" }, message.cc));
-    }
-    output.push_str(&format!("\n[{}]", if final_match { "T" } else { "F" }));
-
-    debug!("{}", output);
-    println!("{}", output);
 }
 
 #[cfg(test)]

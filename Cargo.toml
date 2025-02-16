@@ -13,7 +13,7 @@ globset = "0.4.15"
 imap = "2.4.1"
 imap-proto = "0.16.5"
 log = "0.4.25"
+mailparse = "0.16.0"
 native-tls = "0.2.13"
-regex = "1.11.1"
 serde = { version = "1.0.217", features = ["derive"] }
 serde_yaml = "0.9.34"
