@@ -22,6 +22,23 @@ pub struct MessageFilter {
     pub star: Option<bool>,
 }
 
+impl MessageFilter {
+    pub fn print_details(&self) {
+        println!("\n{}", self.name);
+        if let Some(to) = &self.to {
+            println!("    to: {:?}", to.patterns);
+        }
+        if let Some(cc) = &self.cc {
+            println!("    cc: {:?}", cc.patterns);
+        }
+        if let Some(from) = &self.from {
+            println!("    from: {:?}", from.patterns);
+        }
+        println!("    move: {}", self.move_to.as_deref().unwrap_or("None"));
+        println!("    star: {}", self.star.unwrap_or(false));
+    }
+}
+
 fn deserialize_address_filter<'de, D>(deserializer: D) -> Result<Option<AddressFilter>, D::Error>
 where
     D: Deserializer<'de>,
@@ -58,4 +75,3 @@ where
 
     deserializer.deserialize_any(AddressFilterVisitor)
 }
-

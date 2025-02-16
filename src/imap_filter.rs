@@ -55,33 +55,22 @@ impl IMAPFilter {
         info!("Applying filters to {} messages", messages.len());
 
         for filter in &self.filters {
-            println!("{}", filter.name);
-            if let Some(to) = &filter.to {
-                println!("    to: {:?}", to.patterns);
-            }
-            if let Some(cc) = &filter.cc {
-                println!("    cc: {:?}", cc.patterns);
-            }
-            if let Some(from) = &filter.from {
-                println!("    from: {:?}", from.patterns);
-            }
-            println!("    move: {}", filter.move_to.as_deref().unwrap_or("None"));
-            println!("    star: {}", filter.star.unwrap_or(false));
+            filter.print_details();
 
-            let filtered: Vec<&Message> = messages.iter().filter(|&msg| msg.compare(filter)).collect();
+            let filtered: Vec<(&Message, (bool, bool, bool))> = messages
+                .iter()
+                .map(|msg| (msg, msg.compare(filter)))
+                .filter(|(_, (from_match, to_match, cc_match))| *from_match && *to_match && *cc_match)
+                .collect();
 
-            println!("\nMatched {}/{} messages", filtered.len(), messages.len());
-
-            for msg in filtered.iter() {
-                println!();
-                println!("    subject: {}", msg.subject);
-                println!("    from: {:?}", msg.from);
-                println!("    to: {:?}", msg.to);
-                if !msg.cc.is_empty() {
-                    println!("    cc: {:?}", msg.cc);
+            for (msg, (from_match, to_match, cc_match)) in &filtered {
+                println!("\n    subject: {}", msg.subject);
+                for (label, matched, field) in [("from", from_match, &msg.from), ("to", to_match, &msg.to), ("cc", cc_match, &msg.cc)] {
+                    if filter.from.is_some() || filter.to.is_some() || filter.cc.is_some() {
+                        println!("[{}] {}: {:?}", if *matched { "T" } else { "F" }, label, field);
+                    }
                 }
             }
-            println!();
         }
 
         info!("Finished applying filters.");

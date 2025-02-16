@@ -3,6 +3,7 @@ use mailparse::{addrparse, MailAddr};
 use serde::{Deserialize, Serialize};
 
 use crate::message_filter::MessageFilter;
+use crate::address_filter::AddressFilter;
 
 fn parse_email_header(header: &str) -> Vec<(String, String)> {
     match addrparse(header) {
@@ -55,20 +56,17 @@ impl Message {
         }
     }
 
-    pub fn compare(&self, filter: &MessageFilter) -> bool {
-        let to_match = filter.to.as_ref().map_or(true, |f| {
-            f.matches(&self.to.iter().map(|(_, email)| email.clone()).collect::<Vec<_>>())
-        });
+    fn matches_field(field: &Option<AddressFilter>, message: &Message, extractor: fn(&Message) -> &Vec<(String, String)>) -> bool {
+        field.as_ref().map_or(true, |f| {
+            f.matches(&extractor(message).iter().map(|(_, email)| email.clone()).collect::<Vec<_>>())
+        })
+    }
 
-        let cc_match = filter.cc.as_ref().map_or(true, |f| {
-            f.matches(&self.cc.iter().map(|(_, email)| email.clone()).collect::<Vec<_>>())
-        });
+    pub fn compare(&self, filter: &MessageFilter) -> (bool, bool, bool) {
+        let from_match = Self::matches_field(&filter.from, self, |m| &m.from);
+        let to_match = Self::matches_field(&filter.to, self, |m| &m.to);
+        let cc_match = Self::matches_field(&filter.cc, self, |m| &m.cc);
 
-        let from_match = filter.from.as_ref().map_or(true, |f| {
-            f.matches(&self.from.iter().map(|(_, email)| email.clone()).collect::<Vec<_>>())
-        });
-
-        to_match && cc_match && from_match
+        (from_match, to_match, cc_match)
     }
 }
-

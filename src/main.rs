@@ -80,7 +80,7 @@ fn setup_logging() {
 
     let log_writer = Box::new(file);
 
-    Builder::from_env(env_logger::Env::default().default_filter_or("info")) // Use RUST_LOG or default to INFO
+    Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format(|buf, record| {
             writeln!(
                 buf,
