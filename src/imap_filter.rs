@@ -247,3 +247,136 @@ fn format_message_output(
     debug!("{}", output);
     println!("{}", output);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::AddressFilter;
+
+    fn test_emails() -> Vec<String> {
+        vec![
+            "scott.idler@tatari.tv".to_string(),
+            "someone@gmail.com".to_string(),
+            "admin@tatari.tv".to_string(),
+            "user@example.com".to_string(),
+            "noreply@github.com".to_string(),
+        ]
+    }
+
+    #[test]
+    fn test_address_filter_single_match() {
+        let filter = AddressFilter {
+            patterns: vec!["*@tatari.tv".to_string()],
+        };
+        let emails = test_emails();
+
+        let expected_matches = vec!["scott.idler@tatari.tv", "admin@tatari.tv"];
+        let actual_matches: Vec<_> = emails
+            .iter()
+            .filter(|email| filter.matches(&vec![email.to_string()]))
+            .collect();
+
+        assert_eq!(actual_matches, expected_matches, "Expected only emails ending in @tatari.tv to match");
+    }
+
+    use std::collections::HashSet;
+
+    #[test]
+    fn test_address_filter_multiple_patterns() {
+        let filter = AddressFilter {
+            patterns: vec!["*@tatari.tv".to_string(), "*@gmail.com".to_string()],
+        };
+        let emails = test_emails();
+
+        let expected_matches: HashSet<_> = vec![
+            "scott.idler@tatari.tv".to_string(),
+            "admin@tatari.tv".to_string(),
+            "someone@gmail.com".to_string(),
+        ]
+        .into_iter()
+        .collect();
+
+        let actual_matches: HashSet<_> = emails
+            .iter()
+            .filter(|email| filter.matches(&vec![email.to_string()]))
+            .cloned()
+            .collect();
+
+        assert_eq!(actual_matches, expected_matches, "Expected @tatari.tv and @gmail.com emails to match");
+    }
+
+    #[test]
+    fn test_address_filter_no_match() {
+        let filter = AddressFilter {
+            patterns: vec!["*@yahoo.com".to_string()],
+        };
+        let emails = test_emails();
+
+        let actual_matches: Vec<_> = emails
+            .iter()
+            .filter(|email| filter.matches(&vec![email.to_string()]))
+            .collect();
+
+        assert_eq!(actual_matches, Vec::<&String>::new(), "Expected no matches since @yahoo.com isn't present");
+    }
+
+    #[test]
+    fn test_address_filter_empty_patterns() {
+        let filter = AddressFilter { patterns: vec![] };
+        let emails = test_emails();
+
+        let actual_matches: Vec<_> = emails
+            .iter()
+            .filter(|email| filter.matches(&vec![email.to_string()]))
+            .collect();
+
+        assert_eq!(actual_matches, Vec::<&String>::new(), "Expected empty patterns to never match any email");
+    }
+
+    #[test]
+    fn test_address_filter_exact_match() {
+        let filter = AddressFilter {
+            patterns: vec!["scott.idler@tatari.tv".to_string()],
+        };
+        let emails = test_emails();
+
+        let expected_matches = vec!["scott.idler@tatari.tv"];
+        let actual_matches: Vec<_> = emails
+            .iter()
+            .filter(|email| filter.matches(&vec![email.to_string()]))
+            .collect();
+
+        assert_eq!(actual_matches, expected_matches, "Expected only scott.idler@tatari.tv to match");
+    }
+
+    #[test]
+    fn test_address_filter_mixed_patterns() {
+        let filter = AddressFilter {
+            patterns: vec!["admin@tatari.tv".to_string(), "*@github.com".to_string()],
+        };
+        let emails = test_emails();
+
+        let expected_matches = vec!["admin@tatari.tv", "noreply@github.com"];
+        let actual_matches: Vec<_> = emails
+            .iter()
+            .filter(|email| filter.matches(&vec![email.to_string()]))
+            .collect();
+
+        assert_eq!(actual_matches, expected_matches, "Expected admin@tatari.tv and noreply@github.com to match");
+    }
+
+    #[test]
+    fn test_address_filter_subdomain_match() {
+        let filter = AddressFilter {
+            patterns: vec!["*@tatari.*".to_string()],
+        };
+        let emails = test_emails();
+
+        let expected_matches = vec!["scott.idler@tatari.tv", "admin@tatari.tv"];
+        let actual_matches: Vec<_> = emails
+            .iter()
+            .filter(|email| filter.matches(&vec![email.to_string()]))
+            .collect();
+
+        assert_eq!(actual_matches, expected_matches, "Expected wildcard subdomain match");
+    }
+}
