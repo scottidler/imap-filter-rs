@@ -11,10 +11,9 @@ use std::fmt;
 use std::net::TcpStream;
 use std::str::FromStr;
 
-
 fn extract_email(input: &str) -> String {
     parse_email_address(input)
-        .map(|parsed| parsed.to_string()) // Convert Address<'_> to String
+        .map(|parsed| parsed.to_string())
         .unwrap_or_else(|_| input.trim().to_string())
 }
 
@@ -53,92 +52,77 @@ impl Message {
     }
 
     fn compare(&self, filter: &MessageFilter) -> bool {
+        let to_match = filter.to.as_ref().map_or(false, |f| f.matches(&self.to));
+        let cc_match = filter.cc.as_ref().map_or(false, |f| f.matches(&self.cc));
+        let from_match = filter.fr.as_ref().map_or(false, |f| f.matches(&[self.from.clone()]));
+
+        let final_match = to_match || cc_match || from_match;
+
         debug!(
-            "Comparing message: UID {} SUBJECT '{}' FROM '{}' TO {:?} CC {:?}",
-            self.uid,
+            "\n    subject: {}\n[{}] from: {}\n[{}] to: {:?}\n[{}] cc: {:?}\n[{}]",
             self.subject,
+            if from_match { "T" } else { "F" },
             self.from,
+            if to_match { "T" } else { "F" },
             self.to,
-            self.cc
+            if cc_match { "T" } else { "F" },
+            self.cc,
+            if final_match { "T" } else { "F" }
         );
 
-        let mut matched = true;
-
-        // Match TO field using globs
-        if let Some(to_filter) = &filter.to {
-            matched &= to_filter.iter().any(|pattern| {
-                let glob = Glob::new(pattern).expect("Invalid glob pattern").compile_matcher();
-                self.to.iter().any(|email| glob.is_match(email))
-            });
-
-            debug!("TO filter match result: {}", matched);
-        }
-
-        // Match CC field using globs
-        if let Some(cc_filter) = &filter.cc {
-            matched &= cc_filter.iter().any(|pattern| {
-                let glob = Glob::new(pattern).expect("Invalid glob pattern").compile_matcher();
-                self.cc.iter().any(|email| glob.is_match(email))
-            });
-
-            debug!("CC filter match result: {}", matched);
-        }
-
-        // Match FROM field using globs
-        if let Some(fr_filter) = &filter.fr {
-            let glob = Glob::new(fr_filter).expect("Invalid glob pattern").compile_matcher();
-            matched &= glob.is_match(&self.from);
-
-            debug!(
-                "FROM filter match: '{}' against '{}' -> {}",
-                self.from, fr_filter, matched
-            );
-        }
-
-        debug!("Final filter match result: {}", matched);
-        matched
+        final_match
     }
 }
 
-fn deserialize_email_list<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+#[derive(Debug, Deserialize)]
+pub struct AddressFilter {
+    pub patterns: Vec<String>,
+}
+
+impl AddressFilter {
+    fn matches(&self, emails: &[String]) -> bool {
+        self.patterns.iter().any(|pattern| {
+            let glob = Glob::new(pattern).expect("Invalid glob pattern").compile_matcher();
+            emails.iter().any(|email| glob.is_match(email))
+        })
+    }
+}
+
+fn deserialize_address_filter<'de, D>(deserializer: D) -> Result<Option<AddressFilter>, D::Error>
 where
     D: Deserializer<'de>,
 {
-    struct EmailListVisitor;
+    struct AddressFilterVisitor;
 
-    impl<'de> Visitor<'de> for EmailListVisitor {
-        type Value = Option<Vec<String>>;
+    impl<'de> Visitor<'de> for AddressFilterVisitor {
+        type Value = Option<AddressFilter>;
 
         fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-            formatter.write_str("a list of email strings")
+            formatter.write_str("a single email pattern or a list of email patterns")
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(Some(AddressFilter {
+                patterns: vec![value.to_string()],
+            }))
         }
 
         fn visit_seq<M>(self, mut seq: M) -> Result<Self::Value, M::Error>
         where
             M: SeqAccess<'de>,
         {
-            let mut emails = Vec::new();
+            let mut patterns = Vec::new();
             while let Some(email_str) = seq.next_element::<String>()? {
-                emails.push(extract_email(&email_str));
+                patterns.push(email_str);
             }
-            Ok(Some(emails))
+            Ok(Some(AddressFilter { patterns }))
         }
     }
 
-    deserializer.deserialize_seq(EmailListVisitor)
-}
-
-fn deserialize_email<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let s: Option<String> = Option::deserialize(deserializer)?;
-    Ok(s.map(|input| extract_email(&input)))
-}
-
-#[derive(Debug, Deserialize)]
-pub struct AddressFilter {
-    pub patterns: Vec<String>
+    deserializer.deserialize_any(AddressFilterVisitor)
 }
 
 #[derive(Debug, Deserialize)]
@@ -146,14 +130,14 @@ pub struct MessageFilter {
     #[serde(skip_deserializing)]
     pub name: String,
 
-    #[serde(default, deserialize_with = "deserialize_email_list")]
-    pub to: Option<Vec<String>>,
+    #[serde(default, deserialize_with = "deserialize_address_filter")]
+    pub to: Option<AddressFilter>,
 
-    #[serde(default, deserialize_with = "deserialize_email_list")]
-    pub cc: Option<Vec<String>>,
+    #[serde(default, deserialize_with = "deserialize_address_filter")]
+    pub cc: Option<AddressFilter>,
 
-    #[serde(default, deserialize_with = "deserialize_email")]
-    pub fr: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_address_filter")]
+    pub fr: Option<AddressFilter>,
 
     pub move_to: Option<String>,
     pub star: Option<bool>,
