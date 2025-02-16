@@ -8,7 +8,6 @@ use crate::message::Message;
 pub use crate::message_filter::MessageFilter;
 use crate::address_filter::AddressFilter;
 
-
 #[derive(Debug)]
 pub struct IMAPFilter {
     client: Session<TlsStream<TcpStream>>,
@@ -52,10 +51,48 @@ impl IMAPFilter {
         Ok(results)
     }
 
+    fn apply_filters(&self, messages: &[Message]) {
+        info!("Applying filters to {} messages", messages.len());
+
+        for filter in &self.filters {
+            println!("{}", filter.name);
+            if let Some(to) = &filter.to {
+                println!("    to: {:?}", to.patterns);
+            }
+            if let Some(cc) = &filter.cc {
+                println!("    cc: {:?}", cc.patterns);
+            }
+            if let Some(from) = &filter.from {
+                println!("    from: {:?}", from.patterns);
+            }
+            println!("    move: {}", filter.move_to.as_deref().unwrap_or("None"));
+            println!("    star: {}", filter.star.unwrap_or(false));
+
+            let filtered: Vec<&Message> = messages.iter().filter(|&msg| msg.compare(filter)).collect();
+
+            println!("\nMatched {}/{} messages", filtered.len(), messages.len());
+
+            for msg in filtered.iter() {
+                println!();
+                println!("    subject: {}", msg.subject);
+                println!("    from: {:?}", msg.from);
+                println!("    to: {:?}", msg.to);
+                if !msg.cc.is_empty() {
+                    println!("    cc: {:?}", msg.cc);
+                }
+            }
+            println!();
+        }
+
+        info!("Finished applying filters.");
+    }
+
     pub fn execute(&mut self) -> Result<()> {
         debug!("Executing IMAP filter process");
 
         let messages = self.fetch_messages()?;
+        self.apply_filters(&messages);
+
         self.client.logout()?;
         debug!("IMAP session logged out successfully.");
 
