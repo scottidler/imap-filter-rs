@@ -22,7 +22,7 @@ struct Message {
     uid: u32,
     to: Vec<String>,
     cc: Vec<String>,
-    from: String,
+    from: Vec<String>,
     subject: String,
 }
 
@@ -41,12 +41,15 @@ impl Message {
         let cc_list = headers.get("Cc")
             .map(|s| s.split(',').map(|s| s.trim().to_string()).collect::<Vec<_>>())
             .unwrap_or_default();
+        let from_list = headers.get("From")
+            .map(|s| s.split(',').map(|s| s.trim().to_string()).collect::<Vec<_>>())
+            .unwrap_or_default();
 
         Self {
             uid: raw_uid,
             to: to_list.iter().map(|s| extract_email(s)).collect(),
             cc: cc_list.iter().map(|s| extract_email(s)).collect(),
-            from: extract_email(headers.get("From").unwrap_or(&"".to_string())),
+            from: from_list.iter().map(|s| extract_email(s)).collect(),
             subject: headers.get("Subject").cloned().unwrap_or_default(),
         }
     }
@@ -54,11 +57,11 @@ impl Message {
     fn compare(&self, filter: &MessageFilter) -> bool {
         let to_match = filter.to.as_ref().map_or(false, |f| f.matches(&self.to));
         let cc_match = filter.cc.as_ref().map_or(false, |f| f.matches(&self.cc));
-        let from_match = filter.fr.as_ref().map_or(false, |f| f.matches(&[self.from.clone()]));
+        let from_match = filter.from.as_ref().map_or(false, |f| f.matches(&self.from));
         let final_match = to_match || cc_match || from_match;
 
         debug!(
-            "\n    subject: {}\n[{}] from: {}\n[{}] to: {:?}\n[{}] cc: {:?}\n[{}]",
+            "\n    subject: {}\n[{}] from: {:?}\n[{}] to: {:?}\n[{}] cc: {:?}\n[{}]",
             self.subject,
             if from_match { "T" } else { "F" },
             self.from,
@@ -136,7 +139,7 @@ pub struct MessageFilter {
     pub cc: Option<AddressFilter>,
 
     #[serde(default, deserialize_with = "deserialize_address_filter")]
-    pub fr: Option<AddressFilter>,
+    pub from: Option<AddressFilter>,
 
     pub move_to: Option<String>,
     pub star: Option<bool>,
@@ -200,7 +203,7 @@ impl IMAPFilter {
 
             for msg in &filtered {
                 info!(
-                    "Matched filter '{}': SUBJECT '{}' FROM '{}' TO {:?} CC {:?}",
+                    "Matched filter '{}': SUBJECT '{}' FROM {:?} TO {:?} CC {:?}",
                     filter.name, msg.subject, msg.from, msg.to, msg.cc
                 );
             }
