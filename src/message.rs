@@ -57,9 +57,11 @@ impl Message {
     }
 
     fn matches_field(field: &Option<AddressFilter>, message: &Message, extractor: fn(&Message) -> &Vec<(String, String)>) -> bool {
-        field.as_ref().map_or(true, |f| {
-            f.matches(&extractor(message).iter().map(|(_, email)| email.clone()).collect::<Vec<_>>())
-        })
+        match field {
+            Some(filter) if filter.patterns.is_empty() => extractor(message).is_empty(),
+            Some(filter) => filter.matches(&extractor(message).iter().map(|(_, email)| email.clone()).collect::<Vec<_>>()),
+            None => true,
+        }
     }
 
     pub fn compare(&self, filter: &MessageFilter) -> (bool, bool, bool) {
