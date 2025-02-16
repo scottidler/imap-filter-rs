@@ -55,7 +55,6 @@ impl Message {
         let to_match = filter.to.as_ref().map_or(false, |f| f.matches(&self.to));
         let cc_match = filter.cc.as_ref().map_or(false, |f| f.matches(&self.cc));
         let from_match = filter.fr.as_ref().map_or(false, |f| f.matches(&[self.from.clone()]));
-
         let final_match = to_match || cc_match || from_match;
 
         debug!(
