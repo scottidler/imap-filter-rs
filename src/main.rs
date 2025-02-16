@@ -11,6 +11,9 @@ use std::fs::OpenOptions;
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
+mod message;
+mod message_filter;
+mod address_filter;
 mod imap_filter;
 
 use imap_filter::{IMAPFilter, MessageFilter};
