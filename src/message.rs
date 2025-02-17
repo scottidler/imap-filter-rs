@@ -72,3 +72,35 @@ impl Message {
         (from_match, to_match, cc_match)
     }
 }
+
+#[test]
+fn test_only_me_star_filter_behavior() {
+    let filter = MessageFilter {
+        name: "only-me-star".to_string(),
+        to: Some(AddressFilter { patterns: vec!["scott.idler@tatari.tv".to_string()] }),
+        from: Some(AddressFilter { patterns: vec!["*@tatari.tv".to_string()] }),
+        cc: Some(AddressFilter { patterns: vec![] }), // Must match emails with no CCs
+        move_to: None,
+        star: Some(true),
+    };
+
+    let matching_email = Message {
+        uid: 1,
+        to: vec![("Scott Idler".to_string(), "scott.idler@tatari.tv".to_string())],
+        from: vec![("Scott Idler".to_string(), "scott.idler@tatari.tv".to_string())],
+        cc: vec![], // This should match since the filter has an explicit empty CC
+        subject: "only to me".to_string(),
+    };
+
+    let non_matching_email = Message {
+        uid: 2,
+        to: vec![("Scott Idler".to_string(), "scott.idler@tatari.tv".to_string())],
+        from: vec![("Scott Idler".to_string(), "scott.idler@tatari.tv".to_string())],
+        cc: vec![("Someone Else".to_string(), "someone@tatari.tv".to_string())], // Should NOT match
+        subject: "cc included".to_string(),
+    };
+
+    assert_eq!(matching_email.compare(&filter), (true, true, true), "Matching email should be accepted");
+    assert_eq!(non_matching_email.compare(&filter), (true, true, false), "Non-matching email should be rejected due to CC");
+}
+

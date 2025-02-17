@@ -1,8 +1,9 @@
 use eyre::{Result, eyre};
 use imap::Session;
-use log::{debug, info};
+use log::{debug, info, error};
 use native_tls::{TlsConnector, TlsStream};
 use std::net::TcpStream;
+use imap::types::Flag; // Import Flag type for correct comparison
 
 use crate::message::Message;
 pub use crate::message_filter::MessageFilter;
@@ -31,7 +32,9 @@ impl IMAPFilter {
     fn fetch_messages(&mut self) -> Result<Vec<Message>> {
         debug!("Fetching messages from INBOX");
 
-        self.client.select("INBOX")?;
+        let inbox_status = self.client.select("INBOX")?;
+        debug!("Mailbox selection status: {:?}", inbox_status);
+
         let messages = self.client.search("ALL")?;
         debug!("Found {} messages in INBOX", messages.len());
 
@@ -51,26 +54,53 @@ impl IMAPFilter {
         Ok(results)
     }
 
-    fn apply_filters(&self, messages: &[Message]) {
+    fn apply_filters(&mut self, mut messages: Vec<Message>) {
         info!("Applying filters to {} messages", messages.len());
 
         for filter in &self.filters {
             filter.print_details();
 
-            let filtered: Vec<(&Message, (bool, bool, bool))> = messages
-                .iter()
-                .map(|msg| (msg, msg.compare(filter)))
-                .filter(|(_, (from_match, to_match, cc_match))| *from_match && *to_match && *cc_match)
-                .collect();
+            let (matched_messages, remaining_messages): (Vec<_>, Vec<_>) = messages
+                .into_iter()
+                .partition(|msg| {
+                    let (from_match, to_match, cc_match) = msg.compare(filter);
+                    from_match && to_match && cc_match
+                });
 
-            for (msg, (from_match, to_match, cc_match)) in &filtered {
-                println!("\n    subject: {}", msg.subject);
-                for (label, matched, field) in [("from", from_match, &msg.from), ("to", to_match, &msg.to), ("cc", cc_match, &msg.cc)] {
-                    if filter.from.is_some() || filter.to.is_some() || filter.cc.is_some() {
-                        println!("[{}] {}: {:?}", if *matched { "T" } else { "F" }, label, field);
+            for msg in &matched_messages {
+                info!("Processing UID: {} | Subject: {}", msg.uid, msg.subject);
+
+                // Moving message by applying a Gmail label instead of using `uid_mv`
+                if let Some(destination) = &filter.move_to {
+                    info!("Applying label '{}' to email UID {}", destination, msg.uid);
+                    if let Err(e) = self.client.uid_store(msg.uid.to_string(), &format!("+X-GM-LABELS \"{}\"", destination)) {
+                        error!("Failed to apply label '{}' to email UID {}: {:?} | Subject: {}", destination, msg.uid, e, msg.subject);
+                    } else {
+                        info!("✅ Successfully labeled UID {} with '{}' | Subject: {}", msg.uid, destination, msg.subject);
+                    }
+                }
+
+                // Starring the email using Gmail-friendly X-GM-LABELS
+                if filter.star.unwrap_or(false) {
+                    info!("Starring email UID: {} | Subject: {}", msg.uid, msg.subject);
+                    if let Err(e) = self.client.uid_store(msg.uid.to_string(), "+X-GM-LABELS (\\Starred)") {
+                        error!("Failed to star email UID {}: {:?} | Subject: {}", msg.uid, e, msg.subject);
+                    } else {
+                        info!("⭐ Successfully starred UID {} using Gmail's X-GM-LABELS | Subject: {}", msg.uid, msg.subject);
+
+                        // Fetch and log the updated labels for verification
+                        if let Ok(updated_labels) = self.client.uid_fetch(msg.uid.to_string(), "X-GM-LABELS") {
+                            debug!("Updated LABELS for UID {}: {:?}", msg.uid, updated_labels);
+
+                            if !updated_labels.iter().any(|fetch| fetch.flags().contains(&imap::types::Flag::Custom("\\Starred".to_string().into()))) {
+                                error!("❌ FAILURE: Email UID {} does NOT have \\Starred after operation! | Subject: {}", msg.uid, msg.subject);
+                            }
+                        }
                     }
                 }
             }
+
+            messages = remaining_messages; // Continue filtering only the remaining messages
         }
 
         info!("Finished applying filters.");
@@ -80,7 +110,7 @@ impl IMAPFilter {
         debug!("Executing IMAP filter process");
 
         let messages = self.fetch_messages()?;
-        self.apply_filters(&messages);
+        self.apply_filters(messages);
 
         self.client.logout()?;
         debug!("IMAP session logged out successfully.");
