@@ -11,11 +11,14 @@ use std::fs::OpenOptions;
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
+mod state;
 mod message;
 mod message_filter;
 mod address_filter;
 mod imap_filter;
+mod uid_tracker;
 
+use state::State;
 use imap_filter::{IMAPFilter, MessageFilter};
 
 #[derive(Parser, Debug)]
@@ -36,17 +39,14 @@ struct Cli {
 
 #[derive(Debug, Deserialize)]
 struct Config {
+    #[serde(alias = "imap-domain")]
     imap_domain: Option<String>,
+    #[serde(alias = "imap-username")]
     imap_username: Option<String>,
+    #[serde(alias = "imap-password")]
     imap_password: Option<String>,
     filters: Vec<HashMap<String, MessageFilter>>,
-    folders: Option<HashMap<String, FolderSettings>>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct FolderSettings {
-    read: Option<String>,
-    unread: Option<String>,
+    states: Vec<HashMap<String, State>>,
 }
 
 fn load_config(cli: &Cli) -> Result<Config> {
@@ -138,9 +138,96 @@ fn main() -> Result<()> {
     debug!("Loaded {} filters.", filters.len());
     debug!("Filters: {:?}", filters);
 
-    let mut imap_filter = IMAPFilter::new(imap_domain, imap_username, imap_password, filters)?;
+    let states: Vec<State> = config
+        .states
+        .into_iter()
+        .flat_map(|map| map.into_iter().map(|(name, mut state)| {
+            state.name = name;
+            state
+        }))
+        .collect();
+
+    debug!("Loaded {} states.", states.len());
+    debug!("States: {:?}", states);
+
+    let mut imap_filter = IMAPFilter::new(imap_domain, imap_username, imap_password, filters, states)?;
     imap_filter.execute()?;
+
 
     info!("IMAP Filter execution completed successfully.");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs::File;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn test_load_config_valid_yaml() {
+        let mut tmpfile = NamedTempFile::new().unwrap();
+        writeln!(
+            tmpfile,
+            r#"
+imap_domain: imap.test.com
+imap_username: test@example.com
+imap_password: secret
+filters:
+  - sample:
+      to: "test@example.com"
+      action: Star
+states:
+  - Keepers:
+      query: 'X-GM-LABELS "\\Starred"'
+      ttl: Keep
+"#
+        ).unwrap();
+
+        let cli = Cli {
+            config: tmpfile.path().to_path_buf(),
+            imap_domain: None,
+            imap_username: None,
+            imap_password: None,
+        };
+
+        let config = load_config(&cli).unwrap();
+        assert_eq!(config.imap_domain.unwrap(), "imap.test.com");
+        assert_eq!(config.filters.len(), 1);
+        assert_eq!(config.states.len(), 1);
+    }
+
+    #[test]
+    fn test_load_config_missing_file_errors() {
+        let cli = Cli {
+            config: PathBuf::from("nonexistent.yml"),
+            imap_domain: None,
+            imap_username: None,
+            imap_password: None,
+        };
+
+        let result = load_config(&cli);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_missing_imap_domain_errors() {
+        let cli = Cli {
+            config: PathBuf::from("whatever.yml"),
+            imap_domain: None,
+            imap_username: Some("user".into()),
+            imap_password: Some("pass".into()),
+        };
+        let config = Config {
+            imap_domain: None,
+            imap_username: Some("user".into()),
+            imap_password: Some("pass".into()),
+            filters: vec![],
+            states: vec![],
+        };
+        let result = cli.imap_domain.or(config.imap_domain)
+            .ok_or_else(|| eyre!("IMAP domain is required"));
+        assert!(result.is_err());
+    }
 }

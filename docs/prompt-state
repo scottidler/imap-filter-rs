@@ -1,0 +1,50 @@
+I'm building an IMAP email filtering and lifecycle manager in Rust, designed specifically for Gmail. The system currently operates in batch mode and is driven by a YAML configuration file. It connects via IMAP, applies user-defined filters to classify and tag messages, and then applies state-based lifecycle logic to age off or preserve messages.
+
+You're being provided:
+- The current Rust codebase for the project
+- A new version of the `imap-filter.yml` config file, which includes an updated `states:` section that replaces the old `folders:` block
+- A detailed specification of the system's intent and behavior (included below)
+
+Your job is to help me update the codebase to support this new model. In particular, I want you to:
+1. Read and understand the new YAML structure. It includes:
+   - Ordered `filters:` (as a list of one-key dictionaries, order matters)
+   - Ordered `states:` (also a list of one-key dictionaries, first match wins)
+   - Each `state` defines an IMAP `query`, and optionally:
+     - `ttl`: which may be a flat string (e.g., `"7d"`) or an object with `read` and `unread` keys
+     - `move_to`: a Gmail label to apply
+     - `action`: a final action such as `"delete"`
+     - `keep: true`: to prevent aging or transitions
+     - `dry_run: true`: to simulate actions without making changes
+
+2. Guide me through updating the Rust code to:
+   - Parse and load this new YAML structure into appropriate structs
+   - Evaluate each state in order (top to bottom)
+   - For each message in the mailbox:
+     - Match it against a single state based on its current IMAP flags and labels
+     - If the state has a TTL, evaluate it against the message's INTERNALDATE
+     - If the message has expired, apply the `move_to` or `action` as specified
+     - Skip action if `keep: true`
+     - Skip destructive changes if `dry_run: true`
+   - Respect `Starred` and `Important` as terminal states unless the labels are manually removed
+   - Ensure age is *not reset* by label changes — INTERNALDATE is always the reference
+   - Consider that thread-level elevation will be added later (but not needed in this first step)
+
+3. Be aware:
+   - Gmail labels are handled via `X-GM-LABELS` in IMAP
+   - Flags like `\Seen`, `\Starred`, and `\Important` affect matching
+   - Label transitions use Gmail’s IMAP extension commands (`UID STORE ... +X-GM-LABELS`, etc.)
+   - The config must be flexible and extensible without recompilation
+   - TTL expiration should be safe and predictable — no unintended deletions
+
+Let’s start by defining the Rust structs that will load the new `states:` config block.
+
+After that, we’ll update the main filtering loop to use this state machine logic.
+
+Please respond with a clear plan of how to proceed, starting from config parsing, through evaluation, and finally message mutation (labeling/deletion).
+
+
+- DO NOT give diffs
+- provide full code blocks of functions or methods of any changes you suggest
+- provide the relative path in the repo to the file you are suggesting each change for
+- do not elide portions of a function block
+- provide code in codeblock in the chat thread

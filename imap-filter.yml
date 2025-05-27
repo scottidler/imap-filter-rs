@@ -1,18 +1,48 @@
 imap-domain: imap.gmail.com
 imap-username: scott.idler@tatari.tv
+
 filters:
-- only-me-star:
-    to: ['scott.idler@tatari.tv']
-    cc: []
-    from: '*@tatari.tv'
-    move: Imbox
-    star: True
-- only-me:
-    to: ['scott.idler@tatari.tv']
-    from: '*@tatari.tv'
-    move: Imbox
-    star: False
-folders:
-  Imbox:
-    read: 7d
-    unread: Null
+  # Match emails directly to me, from a tatari.tv sender, with no CC.
+  # These are marked as Starred and Important
+  - only-me-star:
+      to: ['scott.idler@tatari.tv']
+      cc: []
+      from: '*@tatari.tv'
+      action: Star
+
+  # Match emails directly to me, from a tatari.tv sender, regardless of CC.
+  # These are only marked Important, not Starred
+  - only-me:
+      to: ['scott.idler@tatari.tv']
+      from: '*@tatari.tv'
+      action: Flag
+
+states:
+  # Messages marked as Starred (either by filter or manually).
+  # These are fully protected from expiry unless the Starred label is removed.
+  - Starred:
+      query: 'X-GM-LABELS "\\Starred"'
+      ttl: Keep
+
+  # Messages marked as Important (but not also Starred).
+  # Preserved similarly to Starred messages until the label is removed.
+  - Important:
+      query: 'X-GM-LABELS "\\Important" NOT X-GM-LABELS "\\Starred"'
+      ttl: Keep
+
+  # Messages that are in the INBOX, have been Seen (read),
+  # and are not Important or Starred.
+  # These are candidates for aging out, based on how long ago they arrived.
+  - Triaged:
+      query: 'X-GM-LABELS "INBOX" SEEN NOT X-GM-LABELS "\\Starred" NOT X-GM-LABELS "\\Important"'
+      ttl:
+        read: 7d
+        unread: 21d
+      action: ToBeDeleted
+
+  # Messages explicitly labeled as ToBeDeleted.
+  # These are in their final staging area before deletion, with a short grace period.
+  - ToBeDeleted:
+      query: 'X-GM-LABELS "ToBeDeleted"'
+      ttl: 3d
+      action: Delete

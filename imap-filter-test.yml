@@ -1,0 +1,10 @@
+imap-domain: imap.gmail.com
+imap-username: scott.idler@tatari.tv
+
+filters:
+  - self-test:
+      from: ['scott.idler@tatari.tv']
+      subject: ['only to me']
+      action: Flag
+
+states: []

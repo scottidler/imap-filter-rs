@@ -5,15 +5,20 @@ edition = "2021"
 
 [dependencies]
 addr = "0.15.6"
-chrono = "0.4.39"
-clap = { version = "4.5.29", features = ["derive", "env"] }
-env_logger = "0.11.6"
+chrono = "0.4.41"
+clap = { version = "4.5.38", features = ["derive", "env"] }
+dirs = "6.0.0"
+env_logger = "0.11.8"
 eyre = "0.6.12"
-globset = "0.4.15"
+globset = "0.4.16"
 imap = "2.4.1"
 imap-proto = "0.16.5"
-log = "0.4.25"
-mailparse = "0.16.0"
-native-tls = "0.2.13"
-serde = { version = "1.0.217", features = ["derive"] }
+log = "0.4.27"
+mailparse = "0.16.1"
+native-tls = "0.2.14"
+serde = { version = "1.0.219", features = ["derive"] }
+serde_plain = "1.0.2"
 serde_yaml = "0.9.34"
+
+[dev-dependencies]
+tempfile = "3.20.0"

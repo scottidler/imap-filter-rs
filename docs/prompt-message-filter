@@ -1,0 +1,47 @@
+I'm building an IMAP email filtering and lifecycle manager in Rust, designed specifically for Gmail. One part of this system is a set of user-defined `filters:` that operate in ACL-style order (first match wins) to classify and tag messages.
+
+You're being provided:
+- The current Rust codebase for the project
+- The `imap-filter.yml` config that includes a `filters:` section
+- Updated goals and requirements for how `MessageFilter` behavior should work
+
+Your job is to help me update the message filtering logic to support a new schema that allows the user to define filtering behavior using a simplified but expressive action model.
+
+Specifically:
+
+1. Each `filter` in YAML must support **either**:
+   - A single scalar field: `action: <action>`
+   - Or a list field: `actions: [<action>, ...]`
+   Both forms are valid YAML and must deserialize into the same `Vec<MessageFilterAction>` on the Rust side.
+
+2. Valid actions include:
+   - `star` → applies both `\Starred` and `\Important`
+   - `flag` → applies only `\Important`
+   - `move: <label>` → moves the message by applying the label and removing `INBOX`
+
+3. Only **one primary action is allowed** per filter evaluation. Even though `actions:` is technically a `Vec`, filters must only be applied once — we treat the first action in the list as the canonical one and ignore any others.
+
+4. Additionally, filters may include a `labels:` field that accepts a `Vec<String>` of Gmail labels to apply. This allows advanced users to fully control labeling when needed, though it's optional and defaults to an empty list.
+
+5. You need to:
+   - Define the `MessageFilterAction` enum to support the above variants using Serde
+   - Write a custom deserializer that accepts both `action` (scalar) and `actions` (list) and loads them into a unified `Vec<MessageFilterAction>` field on `MessageFilter`
+   - Update the `MessageFilter` struct accordingly
+   - Ensure the deserializer respects the aliases (`action`, `actions`) and defaults to an empty vector if neither is specified
+
+6. DO NOT unify this with the state machine logic. This is specific to the filtering phase and must remain separate from the `states:` section of the config.
+
+7. Implementation notes:
+   - You may use Serde's `Visitor` trait to handle mixed scalar/list deserialization.
+   - You may use `#[serde(alias = "...")]` or similar to unify the fields behind one deserialization entry point.
+   - Do not use external crates unless necessary — keep it lean.
+   - Filters must apply **only one action** during execution, even if multiple are listed.
+
+8. Output format:
+   - DO NOT give diffs
+   - Provide full code blocks of any function, enum, or method that changes
+   - Provide the relative file path for each change (e.g. `src/message_filter.rs`)
+   - Do not elide or collapse any portions of functions — include the full body
+   - Use fenced code blocks for all code in the chat thread
+
+Let’s begin with the enum definition and deserializer logic for `MessageFilterAction`, followed by changes to the `MessageFilter` struct in `src/message_filter.rs`.
