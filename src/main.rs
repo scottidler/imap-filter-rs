@@ -11,12 +11,13 @@ use std::fs::OpenOptions;
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
+mod utils;
 mod state;
 mod message;
 mod message_filter;
 mod address_filter;
 mod imap_filter;
-mod uid_tracker;
+//mod uid_tracker;
 
 use state::State;
 use imap_filter::{IMAPFilter, MessageFilter};
@@ -66,6 +67,15 @@ fn load_config(cli: &Cli) -> Result<Config> {
 
     debug!("Successfully loaded configuration.");
     debug!("Parsed config: {:?}", config);
+
+    // 🔍 Validate state queries
+    for state_map in &config.states {
+        for (name, state) in state_map {
+            if let Err(e) = crate::utils::validate_imap_query(&state.query) {
+                return Err(eyre!("Invalid IMAP query in state '{}': {}", name, e));
+            }
+        }
+    }
 
     Ok(config)
 }
@@ -171,18 +181,18 @@ mod tests {
         writeln!(
             tmpfile,
             r#"
-imap_domain: imap.test.com
-imap_username: test@example.com
-imap_password: secret
-filters:
-  - sample:
-      to: "test@example.com"
-      action: Star
-states:
-  - Keepers:
-      query: 'X-GM-LABELS "\\Starred"'
-      ttl: Keep
-"#
+    imap_domain: imap.test.com
+    imap_username: test@example.com
+    imap_password: secret
+    filters:
+    - sample:
+        to: "test@example.com"
+        action: Star
+    states:
+    - Keepers:
+        query: 'X-GM-LABELS "Starred"'
+        ttl: Keep
+    "#
         ).unwrap();
 
         let cli = Cli {

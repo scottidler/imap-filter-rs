@@ -16,6 +16,7 @@ imap-proto = "0.16.5"
 log = "0.4.27"
 mailparse = "0.16.1"
 native-tls = "0.2.14"
+regex = "1.11.1"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_plain = "1.0.2"
 serde_yaml = "0.9.34"
