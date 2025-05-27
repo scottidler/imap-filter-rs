@@ -4,13 +4,14 @@ use log::{debug, info, error};
 use native_tls::{TlsConnector, TlsStream};
 use std::net::TcpStream;
 use imap::types::Flag;
+use chrono::{DateTime, Duration, Utc};
 
 use crate::message::Message;
 pub use crate::message_filter::{MessageFilter, FilterAction};
 use crate::address_filter::AddressFilter;
 use crate::state::{State, StateAction};
 //use crate::uid_tracker::{load_last_uid, save_last_uid};
-use crate::utils::{set_label, del_label};
+use crate::utils::{parse_days, set_label, del_label};
 
 pub struct IMAPFilter {
     client: Session<TlsStream<TcpStream>>,
@@ -67,6 +68,7 @@ impl IMAPFilter {
         Ok(results)
     }
 
+    /// First-pass filtering: apply user-defined filters (Star, Flag, or Move).
     fn apply_filters(&mut self, mut messages: Vec<Message>) {
         info!("Applying filters to {} messages", messages.len());
 
@@ -81,37 +83,43 @@ impl IMAPFilter {
                 });
 
             for msg in &matched_messages {
-                info!("Processing UID: {} | Seq: {} | Subject: {}", msg.uid, msg.seq, msg.subject);
+                info!(
+                    "Processing UID: {} | Seq: {} | Subject: {}",
+                    msg.uid, msg.seq, msg.subject
+                );
 
-                for action in &filter.actions {
+                // We only honor the *first* action in the Vec.
+                if let Some(action) = filter.actions.first() {
                     match action {
                         FilterAction::Star => {
-                            info!("Starring UID: {} | Seq: {} | Subject: {}", msg.uid, msg.seq, msg.subject);
-                            if let Err(e) = self.client.uid_store(msg.uid.to_string(), "+X-GM-LABELS (\\Starred)") {
+                            info!("Starring UID: {} | Subject: {}", msg.uid, msg.subject);
+                            if let Err(e) = self
+                                .client
+                                .uid_store(msg.uid.to_string(), "+X-GM-LABELS (\\Starred)")
+                            {
                                 error!("Failed to star UID {}: {:?} | Subject: {}", msg.uid, e, msg.subject);
                             } else {
                                 info!("⭐ Successfully starred UID {} | Subject: {}", msg.uid, msg.subject);
                             }
                         }
                         FilterAction::Flag => {
-                            info!("Flagging UID: {} | Seq: {} | Subject: {}", msg.uid, msg.seq, msg.subject);
-                            if let Err(e) = self.client.uid_store(msg.uid.to_string(), "+X-GM-LABELS (\\Important)") {
+                            info!("Flagging UID: {} | Subject: {}", msg.uid, msg.subject);
+                            if let Err(e) = self
+                                .client
+                                .uid_store(msg.uid.to_string(), "+X-GM-LABELS (\\Important)")
+                            {
                                 error!("Failed to flag UID {}: {:?} | Subject: {}", msg.uid, e, msg.subject);
                             } else {
                                 info!("🚩 Successfully flagged UID {} | Subject: {}", msg.uid, msg.subject);
                             }
                         }
                         FilterAction::Move(label) => {
-                            info!("Applying label '{}' to UID {} | Subject: {}", label, msg.uid, msg.subject);
-                            if let Err(e) = set_label(&mut self.client, msg.uid, label, &msg.subject) {
-                                error!("❌ {}", e);
+                            info!("Moving UID: {} → '{}' | Subject: {}", msg.uid, label, msg.subject);
+                            // UID MOVE is atomic: adds label and removes INBOX
+                            if let Err(e) = self.client.uid_mv(msg.uid.to_string(), label) {
+                                error!("Failed to MOVE UID {}: {:?} | Subject: {}", msg.uid, e, msg.subject);
                             } else {
-                                info!("✅ Successfully labeled UID {} with '{}' | Subject: {}", msg.uid, label, msg.subject);
-                                if let Err(e) = del_label(&mut self.client, msg.uid, "INBOX", &msg.subject) {
-                                    error!("❌ {}", e);
-                                } else {
-                                    info!("📤 Removed 'INBOX' label from UID {} | Subject: {}", msg.uid, msg.subject);
-                                }
+                                info!("✅ Successfully moved UID {} to '{}' | Subject: {}", msg.uid, label, msg.subject);
                             }
                         }
                     }
@@ -124,6 +132,7 @@ impl IMAPFilter {
         info!("Finished applying filters.");
     }
 
+    /// Second-pass state transitions: move or delete based on TTL and labels.
     fn apply_transitions(&mut self, uid: u32, action: &StateAction, subject: &str) {
         match action {
             StateAction::Delete => {
@@ -135,69 +144,101 @@ impl IMAPFilter {
                 }
             }
             StateAction::Move(label) => {
-                info!("Applying label '{}' to UID {} | Subject: {}", label, uid, subject);
-                if let Err(e) = set_label(&mut self.client, uid, label, subject) {
-                    error!("❌ {}", e);
+                info!("Moving UID {} → '{}' | Subject: {}", uid, label, subject);
+                // UID MOVE will remove INBOX automatically
+                if let Err(e) = self.client.uid_mv(uid.to_string(), label) {
+                    error!("❌ Failed to MOVE UID {}: {:?} | Subject: {}", uid, e, subject);
                 } else {
-                    info!("✅ Successfully labeled UID {} with '{}' | Subject: {}", uid, label, subject);
-                    if let Err(e) = del_label(&mut self.client, uid, "INBOX", subject) {
-                        error!("❌ {}", e);
-                    } else {
-                        info!("📤 Removed 'INBOX' label from UID {} | Subject: {}", uid, subject);
-                    }
+                    info!("✅ Successfully moved UID {} to '{}' | Subject: {}", uid, label, subject);
                 }
             }
         }
     }
 
-    fn evaluate_states(&mut self, states: &[State]) -> Result<()> {
+    fn evaluate_states(&mut self, states: &[State]) -> Result<(), eyre::ErrReport> {
         info!("Evaluating {} states for TTL and transition", states.len());
 
-        // We select by mailbox name first (sequence numbers apply here, but we'll do UID searches).
+        // Select INBOX once
         self.client.select("INBOX")?;
 
         for state in states {
             info!("Evaluating state: {}", state.name);
 
-            // Perform a UID SEARCH rather than SEARCH, so that the numbers we get back are UIDs.
+            // 1) UID SEARCH
             let uids = self.client.uid_search(&state.query)?;
             debug!("State '{}' matched {} messages", state.name, uids.len());
-
             if uids.is_empty() {
                 continue;
             }
 
-            // Build a comma-separated UID set for the next call.
-            let uid_set = uids
-                .iter()
-                .map(|uid| uid.to_string())
+            // 2) Build UID set
+            let uid_set = uids.iter()
+                .map(|u| u.to_string())
                 .collect::<Vec<_>>()
                 .join(",");
 
-            // Fetch the ENVELOPE over UID (so Fetch.uid is populated)
-            let fetches = self.client.uid_fetch(&uid_set, "ENVELOPE")?;
+            // 3) UID FETCH ENVELOPE, INTERNALDATE, FLAGS (must be parenthesized)
+            let fetches = self.client.uid_fetch(&uid_set, "(ENVELOPE INTERNALDATE FLAGS)")?;
+
+            let now: DateTime<Utc> = Utc::now();
 
             for fetch in fetches.iter() {
-                // Now we can safely unwrap the UID
-                let uid = fetch.uid.unwrap_or_else(|| {
-                    // Should never happen, but guard anyway
-                    error!("Expected UID in fetch, got none for state '{}'", state.name);
-                    0
-                });
-
-                // Extract subject for logging
+                let uid = fetch.uid.expect("Expected UID in fetch");
                 let subject = fetch
                     .envelope()
-                    .and_then(|env| env.subject.as_ref())
+                    .and_then(|e| e.subject.as_ref())
                     .map(|s| String::from_utf8_lossy(s).to_string())
                     .unwrap_or_else(|| "<no subject>".to_string());
 
+                // Message age
+                let internal: DateTime<Utc> = fetch
+                    .internal_date()
+                    .expect("Failed to fetch INTERNALDATE")
+                    .with_timezone(&Utc);
+                let age = now.signed_duration_since(internal);
+
+                // Determine TTL duration
+                let ttl_duration: Duration = match &state.ttl {
+                    crate::state::TTL::Keep => {
+                        info!(
+                            "State '{}' is KEEP → skipping UID {} | Subject: {}",
+                            state.name, uid, subject
+                        );
+                        continue;
+                    }
+                    crate::state::TTL::Simple(s) => parse_days(s)?,
+                    crate::state::TTL::Detailed { read, unread } => {
+                        // Inspect FLAGS for \Seen
+                        let flags: &[Flag] = fetch.flags();
+                        let chosen = if flags.iter().any(|f| *f == Flag::Seen) {
+                            read
+                        } else {
+                            unread
+                        };
+                        parse_days(chosen)?
+                    }
+                };
+
+                // If not expired, skip
+                if age < ttl_duration {
+                    debug!(
+                        "UID {} age {:?} < TTL {:?} → skip",
+                        uid, age, ttl_duration
+                    );
+                    continue;
+                }
+
+                // Expired → apply
                 if state.nerf {
                     info!(
-                        "NERF mode: would apply {:?} to UID {} | Subject: {}",
+                        "NERF: would apply {:?} to UID {} | Subject: {}",
                         state.action, uid, subject
                     );
                 } else {
+                    info!(
+                        "TTL expired (age {:?}, TTL {:?}) → applying {:?} to UID {}",
+                        age, ttl_duration, state.action, uid
+                    );
                     self.apply_transitions(uid, &state.action, &subject);
                 }
             }

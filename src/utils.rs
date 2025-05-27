@@ -4,7 +4,24 @@ use native_tls::TlsStream;
 use std::net::TcpStream;
 use log::{info, debug};
 use std::collections::HashSet;
+use chrono::{DateTime, Duration, Utc};
 use regex::Regex;
+
+/// Parse a string like "7d" into a chrono::Duration of days.
+/// Returns an error if the format is unsupported.
+pub fn parse_days(s: &str) -> Result<Duration, eyre::ErrReport> {
+    let s = s.trim();
+    if let Some(num) = s.strip_suffix('d') {
+        let days: i64 = num.parse()
+            .map_err(|e| eyre::eyre!("Invalid TTL duration '{}': {}", s, e))?;
+        Ok(Duration::days(days))
+    } else {
+        Err(eyre::eyre!(
+            "Unsupported TTL format '{}'; expected '<n>d'",
+            s
+        ))
+    }
+}
 
 /// Validates that an IMAP search query uses supported flags and syntax.
 pub fn validate_imap_query(query: &str) -> Result<()> {
