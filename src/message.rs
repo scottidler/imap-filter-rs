@@ -99,6 +99,7 @@ mod tests {
             to: Some(AddressFilter { patterns: vec!["scott.idler@tatari.tv".to_string()] }),
             from: Some(AddressFilter { patterns: vec!["*@tatari.tv".to_string()] }),
             cc: Some(AddressFilter { patterns: vec![] }), // Must match emails with no CCs
+            subject: vec!["only to me".to_string()],
             actions: vec![FilterAction::Star, FilterAction::Flag],
         };
 
@@ -118,8 +119,8 @@ mod tests {
             subject: "cc included".to_string(),
         };
 
-        assert_eq!(matching_email.compare(&filter), (true, true, true), "Matching email should be accepted");
-        assert_eq!(non_matching_email.compare(&filter), (true, true, false), "Non-matching email should be rejected due to CC");
+        assert_eq!(matching_email.compare(&filter), (true, true, true, true), "Matching email should be accepted");
+        assert_eq!(non_matching_email.compare(&filter), (true, true, false, false), "Non-matching email should be rejected due to CC and subject");
     }
 
     #[test]
@@ -191,6 +192,7 @@ mod tests {
             to: Some(AddressFilter { patterns: vec!["scott@tatari.tv".to_string()] }),
             from: None,
             cc: None,
+            subject: vec![],
             actions: vec![],
         };
 
@@ -202,6 +204,6 @@ mod tests {
             subject: "Ping".to_string(),
         };
 
-        assert_eq!(msg.compare(&filter), (true, true, true));
+        assert_eq!(msg.compare(&filter), (true, true, true, true));
     }
 }

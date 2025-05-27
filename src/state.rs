@@ -72,7 +72,7 @@ impl<'de> Deserialize<'de> for StateAction {
             type Value = StateAction;
 
             fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                f.write_str("a folder name to move to, or the literal 'delete'")
+                f.write_str("a folder name string, the literal 'delete', or a map like { Move: 'FolderName' }")
             }
 
             fn visit_str<E>(self, value: &str) -> Result<StateAction, E>
@@ -83,6 +83,24 @@ impl<'de> Deserialize<'de> for StateAction {
                     Ok(StateAction::Delete)
                 } else {
                     Ok(StateAction::Move(value.to_string()))
+                }
+            }
+
+            fn visit_map<M>(self, mut map: M) -> Result<StateAction, M::Error>
+            where
+                M: serde::de::MapAccess<'de>,
+            {
+                let key: Option<String> = map.next_key()?;
+                if let Some(k) = key {
+                    match k.as_str() {
+                        "Move" => {
+                            let value: String = map.next_value()?;
+                            Ok(StateAction::Move(value))
+                        }
+                        _ => Err(serde::de::Error::unknown_field(&k, &["Move"])),
+                    }
+                } else {
+                    Err(serde::de::Error::custom("Expected a key like 'Move'"))
                 }
             }
         }
@@ -195,6 +213,13 @@ mod tests {
             value["action"],
             StateAction::Move("ToBeDeleted".to_string())
         );
+    }
+
+    #[test]
+    fn test_deserialize_state_action_map_form() {
+        let yaml = r#"action: { Move: "Trash" }"#;
+        let value: HashMap<String, StateAction> = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(value["action"], StateAction::Move("Trash".to_string()));
     }
 
     #[test]

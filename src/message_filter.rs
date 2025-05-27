@@ -235,6 +235,7 @@ mod tests {
             to: Some(AddressFilter { patterns: vec!["alice@foo.com".to_string()] }),
             cc: None,
             from: Some(AddressFilter { patterns: vec!["*@tatari.tv".to_string()] }),
+            subject: vec!["*urgent*".to_string()],
             actions: vec![FilterAction::Flag],
         };
 

@@ -235,6 +235,7 @@ mod tests {
             to: Some(AddressFilter { patterns: vec!["scott@tatari.tv".into()] }),
             cc: Some(AddressFilter { patterns: vec![] }),
             from: Some(AddressFilter { patterns: vec!["*@tatari.tv".into()] }),
+            subject: vec!["test".to_string()],
             actions: vec![FilterAction::Star, FilterAction::Move("Inbox/Processed".into())],
         }
     }
@@ -243,8 +244,8 @@ mod tests {
     fn test_compare_logic_matches_expected() {
         let msg = sample_message(123);
         let filter = sample_filter();
-        let (from_match, to_match, cc_match) = msg.compare(&filter);
-        assert!(from_match && to_match && cc_match, "Message should match all fields");
+        let (from_match, to_match, cc_match, sub_match) = msg.compare(&filter);
+        assert!(from_match && to_match && cc_match && sub_match, "Message should match all fields");
     }
 
     #[test]

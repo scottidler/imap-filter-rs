@@ -45,4 +45,5 @@ states:
   - ToBeDeleted:
       query: 'X-GM-LABELS "ToBeDeleted"'
       ttl: 3d
-      action: Delete
+      action:
+        Move: Deleted
