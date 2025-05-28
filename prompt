@@ -1,0 +1,108 @@
+You are ChatGPT. I’m building an IMAP email filtering and lifecycle manager in Rust for Gmail. It’s a batch CLI driven by a YAML file. It connects via IMAP (using the imap crate v2.4.1), applies user-defined filters to classify and tag messages, then runs an ordered state machine to age-off or delete messages. Future ChatGPT sessions must follow this spec exactly.
+
+1. CONTEXT
+   Uses Rust + imap crate, targets Gmail via IMAP extensions (X-GM-LABELS, X-GM-THRID, X-GM-MSGID). Applies standard IMAP flags (\Seen, \Flagged, \Deleted, \Draft, \Recent) and Gmail labels (folders). Workflow: CONNECT → FETCH → FILTERS → STATES → LOGOUT.
+
+2. FILTERS PHASE
+   • Config “filters:” is an ordered list of single-key maps; order matters; first match wins.
+   • Each filter must deserialize either a scalar “action:” or a list “actions: []” into Vec<MessageFilterAction>. Valid actions:
+     – star  → apply both \\Starred and \\Important
+     – flag  → apply \\Important only
+     – move: <label> → add Gmail label <label>, remove INBOX
+   • Only the first action is honored at runtime. Any additional listed actions are ignored.
+   • Filters may include an optional “labels:” Vec<String> to apply arbitrary Gmail labels. Defaults to empty.
+   • Implement MessageFilterAction enum and custom Serde deserializer to accept both “action” and “actions” and default to empty Vec if absent.
+
+3. STATES PHASE
+   • Config “states:” is an ordered list of single-key maps; first match wins.
+   • Each state map’s key is its name. Its value must contain:
+     – query: String (validated IMAP search query)
+     – ttl: one of:
+         • “keep” (indefinite retention)
+         • flat duration string “<n>d” (e.g. “7d”)
+         • map { read: “<n>d”, unread: “<n>d” }
+     – action: optional; either folder name string or “delete”; defaults to Move("ToBeDeleted")
+     – nerf: optional boolean; if true, simulate without mutating; default false
+   • During execution, after filters:
+     FOR each state in order:
+       run CLIENT.uid_search(state.query) to get UIDs
+       for each UID in ascending order:
+         skip if labels contain “Starred” or “Important”
+         fetch INTERNALDATE and FLAGS in one UID FETCH call: “UID FETCH <uid> (INTERNALDATE FLAGS X-GM-LABELS)”
+         parse age = now − INTERNALDATE, select TTL based on seen/unseen; skip if age < TTL
+         if expired and nerf=false, apply state.action:
+           • Move(label) → set Gmail label and remove INBOX via utils::uid_move_gmail
+           • Delete → client.uid_store(uid, "+FLAGS (\\Deleted)")
+         if nerf=true, log what would happen
+   • Do not pipeline separate FETCH calls for different attributes; always fetch all needed attributes in a single atomic command to avoid imap crate parser errors with interleaved untagged responses.
+   • If you absolutely must separate labels from dates/flags, drop to raw run_command_and_read_response and parse with imap_proto::parse_response yourself, but that is complex. Fetch-everything-in-one is simplest.
+
+4. IMPLEMENTATION NOTES
+   • Define MessageFilterAction enum in src/message_filter.rs, with Serde custom Visitor to handle scalar or sequence.
+   • Update MessageFilter struct to have Vec<MessageFilterAction> and optional Vec<String> labels, with #[serde(default)] and aliases for “action” and “actions.”
+   • Define State, TTL, and StateAction types in src/state.rs as shown, using Serde visitors for flat vs map TTL and action mapping.
+   • Use utils::parse_days, get_labels, uid_move_gmail, set_label, del_label.
+   • In IMAPFilter.apply_filters, only honor first action per filter.
+   • In IMAPFilter.evaluate_states, select mailbox once, iterate states, use IMAP UID SEARCH then one UID FETCH per UID for all needed data.
+   • Use BODY.PEEK[HEADER.FIELDS …] instead of BODY[HEADER.FIELDS …] to avoid marking messages seen during filter header fetches.
+   • After marking \Deleted, call expunge() or uid_expunge() to purge messages if desired.
+   • For batching, group UID STORE commands into comma-separated ranges where possible.
+   • Use env_logger for logging.
+
+5. TESTING & EDGE CASES
+   • Unit tests for filter deserialization, Message.compare logic, SubjectFilter, AddressFilter.
+   • Simulate Gmail interleaved FETCH responses in parser tests.
+   • Test KEEP TTL by ttl: keep, test flat and detailed TTL.
+   • Test nerf flag no-ops.
+   • Simulate missing UIDPLUS and fall back to store+expunge.
+
+6. FILES TO CHANGE & OUTPUT FORMAT
+   For each change, always provide full new or updated code blocks (no diffs), include relative file path, don’t elide any part of functions or enum definitions, wrap code in fenced code blocks for copy/paste.
+
+Now implement the Serde enum and deserializer for MessageFilterAction and update MessageFilter accordingly in src/message_filter.rs.
+
+---
+
+Optimizing IMAP Fetch & Store for Gmail in Rust
+
+1. Avoid Two-Stage FETCH
+   • Don’t split your work into separate UID FETCH calls (one for labels, another for dates/flags/envelope).
+   • Gmail can interleave unsolicited FETCH responses between those calls.
+   • The imap crate expects each command to return one continuous response ending with its matching tag. Interleaved replies break its tag assertions.
+
+2. One-Shot FETCH Workaround
+   • Fetch all needed attributes in a single UID FETCH command:
+     UID FETCH <uids> (X-GM-LABELS INTERNALDATE FLAGS ENVELOPE)
+   • This bundles labels, internal date, flags and envelope together.
+   • The parser sees exactly one response stream per command and never panics.
+
+3. Batch Your Operations
+   a) Search first
+      UID SEARCH <filter-criteria>
+      → Returns only UIDs you actually need.
+   b) Fetch once
+      UID FETCH 123,125,128:* (X-GM-LABELS INTERNALDATE FLAGS ENVELOPE)
+      → Grab everything in one go without extra round trips.
+   c) Store/move in bulk
+      UID STORE 123,125,128 +X-GM-LABELS (ToBeDeleted) -X-GM-LABELS (\Inbox)
+      → Apply labels and remove INBOX for multiple messages at once.
+
+4. Use BODY.PEEK for Headers
+   • When fetching headers, use PEEK so you don’t accidentally mark messages as Seen:
+     UID FETCH <uids> (BODY.PEEK[HEADER.FIELDS (TO CC FROM SUBJECT)])
+   • Keeps messages Unseen until you explicitly mark them.
+
+5. Persist Highest-Seen UID
+   • Track and save the highest UID you processed on each run.
+   • On subsequent runs, only SEARCH for UIDs greater than that.
+   • Dramatically reduces the number of messages you touch and speeds up each run.
+
+6. Keep IMAP Commands Atomic
+   • Each command should be self-contained: one SEARCH, one FETCH, one STORE.
+   • Prevents parser errors and leverages Gmail’s server-side optimizations.
+
+7. Next Steps
+   • Implement UID persistence to enable incremental runs.
+   • Refactor apply_filters() and evaluate_states() to use SEARCH → batched FETCH → batched STORE.
+   • Ensure BODY.PEEK is used for header-only fetches.
+   • Add expunge or UID EXPUNGE for final deletion if needed.
