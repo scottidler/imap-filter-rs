@@ -5,11 +5,12 @@ use native_tls::{TlsConnector, TlsStream};
 use std::net::TcpStream;
 use imap::types::Flag;
 use chrono::{DateTime, Duration, Utc};
+use std::collections::{HashSet, HashMap};
 
 use crate::message::Message;
 pub use crate::message_filter::{MessageFilter, FilterAction};
 use crate::address_filter::AddressFilter;
-use crate::state::{State, StateAction};
+use crate::state::{State, StateAction, TTL};
 //use crate::uid_tracker::{load_last_uid, save_last_uid};
 use crate::utils::{parse_days, set_label, del_label};
 
@@ -155,89 +156,96 @@ impl IMAPFilter {
         }
     }
 
-    fn evaluate_states(&mut self, states: &[State]) -> Result<(), eyre::ErrReport> {
+// src/imap_filter.rs
+
+    /// Second-pass state transitions: move or delete based on TTL and labels.
+    fn evaluate_states(&mut self, states: &[State]) -> Result<()> {
+        use crate::utils::get_labels;
         info!("Evaluating {} states for TTL and transition", states.len());
 
         // Select INBOX once
         self.client.select("INBOX")?;
+        let now: DateTime<Utc> = Utc::now();
 
         for state in states {
             info!("Evaluating state: {}", state.name);
 
-            // 1) UID SEARCH
-            let uids = self.client.uid_search(&state.query)?;
-            debug!("State '{}' matched {} messages", state.name, uids.len());
+            // 1) Search for all UIDs matching this state's query
+            let uids = self.client.uid_search(&state.query)?
+                .into_iter()
+                .collect::<Vec<_>>();
+
+            debug!("State '{}' matched {} UIDs", state.name, uids.len());
             if uids.is_empty() {
                 continue;
             }
 
-            // 2) Build UID set
-            let uid_set = uids.iter()
-                .map(|u| u.to_string())
-                .collect::<Vec<_>>()
-                .join(",");
+            // 2) For each UID, in ascending order:
+            for uid in uids {
+                // a) Skip if we've already moved/deleted it in a previous state pass
+                //    (this assumes state order is protective first-protective last)
+                //    If you want to track it explicitly, you can insert into a `handled: HashSet<_>`.
 
-            // 3) UID FETCH ENVELOPE, INTERNALDATE, FLAGS (must be parenthesized)
-            let fetches = self.client.uid_fetch(&uid_set, "(ENVELOPE INTERNALDATE FLAGS)")?;
+                // b) Load its labels
+                let labels = get_labels(&mut self.client, uid)?;
+                debug!("UID {} labels = {:?}", uid, labels);
 
-            let now: DateTime<Utc> = Utc::now();
+                // c) If it’s Starred or Important, it gets a free pass forever
+                if labels.contains("Starred") || labels.contains("Important") {
+                    debug!("UID {} is Starred/Important → skipping", uid);
+                    continue;
+                }
 
-            for fetch in fetches.iter() {
-                let uid = fetch.uid.expect("Expected UID in fetch");
+                // d) Fetch INTERNALDATE and FLAGS for TTL
+                let seq = uid.to_string();
+                let fetches = self.client.uid_fetch(&seq, "(INTERNALDATE FLAGS)")?;
+                let fetch = fetches
+                    .get(0)
+                    .expect("INTERNALDATE/FLAGS fetch must return one item");
+
                 let subject = fetch
                     .envelope()
                     .and_then(|e| e.subject.as_ref())
                     .map(|s| String::from_utf8_lossy(s).to_string())
                     .unwrap_or_else(|| "<no subject>".to_string());
 
-                // Message age
-                let internal: DateTime<Utc> = fetch
+                // compute age
+                let internal = fetch
                     .internal_date()
-                    .expect("Failed to fetch INTERNALDATE")
+                    .expect("INTERNALDATE must be present")
                     .with_timezone(&Utc);
                 let age = now.signed_duration_since(internal);
 
-                // Determine TTL duration
-                let ttl_duration: Duration = match &state.ttl {
-                    crate::state::TTL::Keep => {
-                        info!(
-                            "State '{}' is KEEP → skipping UID {} | Subject: {}",
-                            state.name, uid, subject
-                        );
+                // determine TTL
+                let ttl_duration = match &state.ttl {
+                    TTL::Keep => {
+                        info!("State '{}' = KEEP → skipping UID {}", state.name, uid);
                         continue;
                     }
-                    crate::state::TTL::Simple(s) => parse_days(s)?,
-                    crate::state::TTL::Detailed { read, unread } => {
-                        // Inspect FLAGS for \Seen
-                        let flags: &[Flag] = fetch.flags();
-                        let chosen = if flags.iter().any(|f| *f == Flag::Seen) {
-                            read
-                        } else {
-                            unread
-                        };
-                        parse_days(chosen)?
+                    TTL::Simple(days) => parse_days(days)?,
+                    TTL::Detailed { read, unread } => {
+                        let seen = fetch.flags().iter().any(|f| *f == Flag::Seen);
+                        let period = if seen { read } else { unread };
+                        parse_days(period)?
                     }
                 };
 
-                // If not expired, skip
+                // e) If not expired, skip
                 if age < ttl_duration {
                     debug!(
-                        "UID {} age {:?} < TTL {:?} → skip",
+                        "UID {} age {:?} < TTL {:?} → skipping",
                         uid, age, ttl_duration
                     );
                     continue;
                 }
 
-                // Expired → apply
+                // f) TTL expired → apply the configured action
                 if state.nerf {
-                    info!(
-                        "NERF: would apply {:?} to UID {} | Subject: {}",
-                        state.action, uid, subject
-                    );
+                    info!("NERF: would apply {:?} to UID {}", state.action, uid);
                 } else {
                     info!(
-                        "TTL expired (age {:?}, TTL {:?}) → applying {:?} to UID {}",
-                        age, ttl_duration, state.action, uid
+                        "TTL expired for UID {} (age {:?}, TTL {:?}) → applying {:?}",
+                        uid, age, ttl_duration, state.action
                     );
                     self.apply_transitions(uid, &state.action, &subject);
                 }
