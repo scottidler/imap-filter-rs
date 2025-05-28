@@ -5,6 +5,7 @@ use std::net::TcpStream;
 use log::{info, debug};
 use std::collections::HashSet;
 use chrono::{DateTime, Duration, Utc};
+use std::io::{Read, Write};
 use regex::Regex;
 
 /// Parse a string like "7d" into a chrono::Duration of days.
@@ -72,21 +73,38 @@ pub fn validate_imap_query(query: &str) -> Result<()> {
 /// Ensures the given label exists on the server.
 /// If the label already exists, this is a no-op.
 /// If it doesn't, attempts to create it.
-pub fn ensure_label_exists(client: &mut Session<TlsStream<TcpStream>>, label: &str) -> Result<()> {
+pub fn ensure_label_exists<T>(
+    client: &mut Session<T>,
+    label: &str,
+) -> Result<()>
+where
+    T: Read + Write,
+{
+    // List all mailboxes and check for existence
     let list = client.list(None, Some("*"))?;
     let exists = list.iter().any(|item| item.name() == label);
 
+    // Create if missing
     if !exists {
         info!("Creating missing label '{}'", label);
-        client.create(label).map_err(|e| eyre!("Failed to create label '{}': {:?}", label, e))?;
+        client
+            .create(label)
+            .map_err(|e| eyre!("Failed to create label '{}': {:?}", label, e))?;
         info!("✅ Label '{}' created successfully", label);
     }
 
     Ok(())
 }
 
-pub fn get_labels(session: &mut Session<TlsStream<TcpStream>>, seq: u32) -> Result<HashSet<String>> {
-    let fetches = session.fetch(seq.to_string(), "X-GM-LABELS")?;
+/// Returns the set of Gmail labels currently on this message (by UID).
+pub fn get_labels<T>(
+    session: &mut Session<T>,
+    uid: u32,
+) -> Result<HashSet<String>>
+where
+    T: Read + Write,
+{
+    let fetches = session.fetch(uid.to_string(), "X-GM-LABELS")?;
     let mut labels = HashSet::new();
 
     for fetch in fetches.iter() {
@@ -97,7 +115,6 @@ pub fn get_labels(session: &mut Session<TlsStream<TcpStream>>, seq: u32) -> Resu
             let rest = &raw[start + "X-GM-LABELS (".len()..];
             if let Some(end) = rest.find(')') {
                 let label_str = &rest[..end];
-
                 for label in label_str.split_whitespace() {
                     let label = label.trim_matches('"');
                     if !label.is_empty() {
@@ -111,50 +128,108 @@ pub fn get_labels(session: &mut Session<TlsStream<TcpStream>>, seq: u32) -> Resu
     Ok(labels)
 }
 
-pub fn set_label(
-    client: &mut Session<TlsStream<TcpStream>>,
-    seq: u32,
+/// Adds `label` to the message (by UID), creating the label if needed.
+pub fn set_label<T>(
+    client: &mut Session<T>,
+    uid: u32,
     label: &str,
     subject: &str,
-) -> Result<()> {
-    let current_labels = get_labels(client, seq)?;
+) -> Result<()>
+where
+    T: Read + Write,
+{
+    let current_labels = get_labels(client, uid)?;
     if current_labels.contains(label) {
         debug!(
-            "Label '{}' already present on seq {} — skipping. Subject: {}",
-            label, seq, subject
+            "Label '{}' already present on UID {} — skipping. Subject: {}",
+            label, uid, subject
         );
         return Ok(());
     }
 
     ensure_label_exists(client, label)?;
 
-    let cmd = format!("+X-GM-LABELS (\"{}\")", label);
+    let cmd = format!("+X-GM-LABELS (\"{}\")", label.replace('\\', "\\\\").replace('"', "\\\""));
     client
-        .store(seq.to_string(), &cmd)
+        .store(uid.to_string(), &cmd)
         .map(|_| ())
         .map_err(|e| eyre!(
-            "Failed to set label '{}' on seq {}: {:?} | Subject: {}",
-            label, seq, e, subject
+            "Failed to set label '{}' on UID {}: {:?} | Subject: {}",
+            label, uid, e, subject
         ))
 }
 
-pub fn del_label(
-    client: &mut Session<TlsStream<TcpStream>>,
-    seq: u32,
+/// Removes `label` from the message (by UID).
+pub fn del_label<T>(
+    client: &mut Session<T>,
+    uid: u32,
     label: &str,
     subject: &str,
-) -> Result<()> {
-    let cmd = format!("-X-GM-LABELS (\"{}\")", label);
+) -> Result<()>
+where
+    T: Read + Write,
+{
+    let cmd = format!("-X-GM-LABELS (\"{}\")", label.replace('\\', "\\\\").replace('"', "\\\""));
     client
-        .store(seq.to_string(), &cmd)
+        .store(uid.to_string(), &cmd)
         .map(|_| ())
         .map_err(|e| eyre!(
-            "Failed to remove label '{}' from seq {}: {:?} | Subject: {}",
-            label, seq, e, subject
+            "Failed to remove label '{}' from UID {}: {:?} | Subject: {}",
+            label, uid, e, subject
         ))
 }
 
-pub fn format_gmail_label(label: &str) -> String {
-    let escaped = label.replace('\\', "\\\\").replace('"', "\\\"");
-    format!("+X-GM-LABELS (\"{}\")", escaped)
+/// “Move” a Gmail message by UID: add your target label and remove INBOX.
+/// Mirrors `client.uid_mv`, but on Gmail must explicitly STORE labels.
+pub fn uid_move<T>(
+    client: &mut Session<T>,
+    uid: u32,
+    label: &str,
+    subject: &str,
+) -> Result<()>
+where
+    T: Read + Write,
+{
+    set_label(client, uid, label, subject)?;
+    del_label(client, uid, "INBOX", subject)?;
+    Ok(())
+}
+
+/// Strip Gmail’s system INBOX label from a message by UID.
+pub fn del_inbox<T>(
+    client: &mut Session<T>,
+    uid: u32,
+    subject: &str,
+) -> Result<()>
+where
+    T: Read + Write,
+{
+    client
+        .uid_store(
+            uid.to_string(),
+            // remove the system INBOX flag (note the leading backslash)
+            "-X-GM-LABELS (\"\\INBOX\")",
+        )
+        .map(|_| ())   // drop the Vec<Fetch>
+        .map_err(|e| eyre!(
+            "Failed to remove \\INBOX from UID {}: {:?} | Subject: {}",
+            uid, e, subject
+        ))
+}
+
+/// Move a Gmail message by UID: add your target label (creating if needed), then strip INBOX.
+pub fn uid_move_gmail<T>(
+    client: &mut Session<T>,
+    uid: u32,
+    label: &str,
+    subject: &str,
+) -> Result<()>
+where
+    T: Read + Write,
+{
+    // 1) add (and create, if missing) the custom label
+    set_label(client, uid, label, subject)?;
+    // 2) remove the system INBOX label
+    del_inbox(client, uid, subject)?;
+    Ok(())
 }

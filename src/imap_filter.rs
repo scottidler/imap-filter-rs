@@ -12,7 +12,7 @@ pub use crate::message_filter::{MessageFilter, FilterAction};
 use crate::address_filter::AddressFilter;
 use crate::state::{State, StateAction, TTL};
 //use crate::uid_tracker::{load_last_uid, save_last_uid};
-use crate::utils::{parse_days, set_label, del_label};
+use crate::utils::{parse_days, set_label, del_label, uid_move_gmail};
 
 pub struct IMAPFilter {
     client: Session<TlsStream<TcpStream>>,
@@ -116,8 +116,7 @@ impl IMAPFilter {
                         }
                         FilterAction::Move(label) => {
                             info!("Moving UID: {} → '{}' | Subject: {}", msg.uid, label, msg.subject);
-                            // UID MOVE is atomic: adds label and removes INBOX
-                            if let Err(e) = self.client.uid_mv(msg.uid.to_string(), label) {
+                            if let Err(e) = uid_move_gmail(&mut self.client, msg.uid, label, &msg.subject) {
                                 error!("Failed to MOVE UID {}: {:?} | Subject: {}", msg.uid, e, msg.subject);
                             } else {
                                 info!("✅ Successfully moved UID {} to '{}' | Subject: {}", msg.uid, label, msg.subject);
@@ -146,8 +145,7 @@ impl IMAPFilter {
             }
             StateAction::Move(label) => {
                 info!("Moving UID {} → '{}' | Subject: {}", uid, label, subject);
-                // UID MOVE will remove INBOX automatically
-                if let Err(e) = self.client.uid_mv(uid.to_string(), label) {
+                if let Err(e) = uid_move_gmail(&mut self.client, uid, label, subject) {
                     error!("❌ Failed to MOVE UID {}: {:?} | Subject: {}", uid, e, subject);
                 } else {
                     info!("✅ Successfully moved UID {} to '{}' | Subject: {}", uid, label, subject);
@@ -155,8 +153,6 @@ impl IMAPFilter {
             }
         }
     }
-
-// src/imap_filter.rs
 
     /// Second-pass state transitions: move or delete based on TTL and labels.
     fn evaluate_states(&mut self, states: &[State]) -> Result<()> {
