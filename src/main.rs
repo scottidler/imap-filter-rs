@@ -19,7 +19,7 @@ mod imap_filter;
 use imap_filter::{IMAPFilter, MessageFilter};
 
 #[derive(Parser, Debug)]
-#[command(name = "imap-filter", version, about = "IMAP email filtering CLI", long_about = None)]
+#[command(name = "imap-filter", version = env!("GIT_DESCRIBE"), about = "IMAP email filtering CLI", long_about = None)]
 struct Cli {
     #[arg(short, long, default_value = "imap-filter.yml")]
     config: PathBuf,
